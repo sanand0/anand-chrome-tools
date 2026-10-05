@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Anand Chrome Tools",
+  "version": "0.1.0",
+  "description": "Small personal browser automations and shortcuts.",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  }
+}

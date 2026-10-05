@@ -1,0 +1,8 @@
+{
+  "name": "anand-chrome-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test.js && node --check service-worker.js"
+  }
+}
