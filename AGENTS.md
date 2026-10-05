@@ -2,11 +2,12 @@
 
 A dependency-free Manifest V3 personal extension for Edge and Chrome.
 
-- Keep the repo flat and boring. Add files/directories only when a real feature needs them.
-- No framework, bundler, TypeScript, or runtime dependency unless the platform cannot do the job cleanly.
-- Keep service-worker.js a thin top-level event router. Register extension event listeners synchronously; extract a sibling module only when a capability becomes substantial.
-- For actions on the current tab, prefer user-triggered activeTab + chrome.scripting.executeScript(). To control a known background tab (for example, a music player), use the narrowest host permission for that origin. Add permissions only with the feature that needs them; avoid <all_urls>.
-- Prefer data maps over repeated command-handling code.
-- Do not add popup/options/UI, icons, persistence, or background activity speculatively.
-- Run npm test after changes. Extend test.js for pure/static behavior; add browser-level tests only when Chrome API behavior cannot be checked otherwise.
-- Update README.md when a feature adds permissions, persistent behavior, a global shortcut, or a new architectural boundary.
+- Keep the repo flat and boring. Add files, dependencies, frameworks, build steps, or options UI only when a real feature requires them.
+- Prefer native browser APIs and data-driven command definitions over custom infrastructure.
+- Register extension listeners synchronously in \`service-worker.js\`; keep browser/API orchestration there and pure reusable logic in \`palette-core.js\`.
+- Use \`chrome.userScripts\` only for arbitrary bookmarklet code. For future fixed packaged actions, prefer narrower native APIs or \`activeTab\` + \`chrome.scripting\` where appropriate.
+- Add permissions only with the feature that needs them and document why they exist in \`README.md\`.
+- Treat bookmark titles, tab titles, URLs, and page content as untrusted; use DOM APIs / \`textContent\`, not interpolated \`innerHTML\`.
+- Preserve keyboard-first behavior and accessibility. Keep palette latency low and avoid background work when it is closed.
+- Run \`npm test\` after changes. Extend \`test.js\` for pure/static behavior and use a browser-level smoke test when Chromium API behavior is material.
+- Update the end-user part of \`README.md\` before developer notes when behavior, setup, shortcuts, permissions, or limitations change.
