@@ -22,6 +22,9 @@ test("manifest wires the command palette with only required capabilities", () =>
   assert.deepEqual(manifest.commands["open-command-palette"].suggested_key, {
     default: "Ctrl+Shift+Space",
   });
+  assert.deepEqual(manifest.commands["new-tab-right"]?.suggested_key, {
+    default: "Ctrl+Shift+Period",
+  });
 });
 
 test("manifest and on-demand injection reference existing local files", () => {
@@ -31,6 +34,8 @@ test("manifest and on-demand injection reference existing local files", () => {
   const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
   assert.match(worker, /chrome\.scripting\.executeScript/);
   assert.match(worker, /files: \["palette-core\.js", "content-script\.js"\]/);
+  assert.match(worker, /name === "new-tab-right"/);
+  assert.match(worker, /index: current\.index \+ 1/);
 });
 
 test("palette is injected on demand and replaces any previous instance", () => {

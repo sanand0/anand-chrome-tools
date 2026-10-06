@@ -16,6 +16,12 @@
         "default": "Ctrl+Shift+Space"
       },
       "description": "Open Command Palette"
+    },
+    "new-tab-right": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Period"
+      },
+      "description": "Open New Tab to the Right"
     }
   }
 }

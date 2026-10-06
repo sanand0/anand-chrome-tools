@@ -13,7 +13,7 @@ The palette is injected only when invoked, so it also works on ordinary tabs tha
 
 ## Use
 
-Press **Ctrl+Shift+Space**.
+Press **Ctrl+Shift+Space** for the command palette. Press **Ctrl+Shift+.** to open a new tab immediately to the right of the current tab.
 
 Search everything together, or start with a prefix:
 
@@ -46,7 +46,7 @@ The palette works on normal `http://` and `https://` pages. Browser-internal or 
 
 The extension is dependency-free Manifest V3 with no build step.
 
-- `manifest.json` declares permissions and `Ctrl+Shift+Space`; there is no persistent content script.
+- `manifest.json` declares permissions and browser shortcuts; there is no persistent content script.
 - `service-worker.js` injects the palette on demand and owns browser APIs: discovering items, executing actions, switching tabs, logging, and export.
 - `palette-core.js` contains pure logic shared by the browser and tests: search/ranking, bookmark discovery/decoding, and GitHub URL mapping.
 - `content-script.js` is an idempotent injected palette UI and applies clipboard/download effects returned by the worker.

@@ -34,13 +34,23 @@ const COMMANDS = [
 const COMMAND_BY_ID = new Map(COMMANDS.map((item) => [item.id, item]));
 
 chrome.commands.onCommand.addListener(async (name, tab) => {
-  if (name !== "open-command-palette") return;
-  const tabId =
-    tab?.id ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id;
-  if (!tabId) return;
+  if (!["open-command-palette", "new-tab-right"].includes(name)) return;
+  const current =
+    tab?.id ? tab : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+  if (!current?.id) return;
+
+  if (name === "new-tab-right") {
+    await chrome.tabs.create({
+      windowId: current.windowId,
+      index: current.index + 1,
+      active: true,
+    });
+    return;
+  }
+
   try {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId: current.id },
       files: ["palette-core.js", "content-script.js"],
     });
   } catch (error) {
@@ -50,9 +60,9 @@ chrome.commands.onCommand.addListener(async (name, tab) => {
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason !== "install") return;
-  const command = (await chrome.commands.getAll()).find(({ name }) => name === "open-command-palette");
-  if (!command?.shortcut) {
-    console.warn("Command Palette shortcut is unavailable. Set it at edge://extensions/shortcuts.");
+  const missing = (await chrome.commands.getAll()).filter(({ shortcut }) => !shortcut);
+  if (missing.length) {
+    console.warn("Some shortcuts are unavailable. Set them at edge://extensions/shortcuts.", missing);
   }
 });
 
