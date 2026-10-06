@@ -12,13 +12,8 @@
   const DEFAULT_PLACEHOLDER = "Search tabs @, bookmarklets !, commands >";
   let palette = null;
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== "open-palette") return;
-    if (palette) palette.input.focus();
-    else void openPalette();
-  });
-
   async function openPalette() {
+    document.querySelector("anand-command-palette")?.remove();
     const host = document.createElement("anand-command-palette");
     host.style.setProperty("all", "initial", "important");
     const shadow = host.attachShadow({ mode: "closed" });
@@ -64,7 +59,7 @@
         }
         .result {
           display: grid;
-          grid-template-columns: 24px minmax(0, 1fr);
+          grid-template-columns: 24px minmax(0, 1fr) auto;
           gap: 7px;
           align-items: center;
           box-sizing: border-box;
@@ -78,6 +73,7 @@
           font: inherit;
           cursor: default;
         }
+        .result:hover { background: #303031; }
         .result[aria-selected="true"] { background: #04395e; color: #ffffff; }
         .prefix {
           color: #9cdcfe;
@@ -100,6 +96,19 @@
           font-size: 11px;
         }
         .result[aria-selected="true"] .detail { color: #c8dbea; }
+        .frequency {
+          display: flex;
+          gap: 3px;
+          align-items: baseline;
+          justify-content: flex-end;
+          min-width: 34px;
+          color: #9a9a9a;
+          font-variant-numeric: tabular-nums;
+        }
+        .frequency .count { font-size: 12px; font-weight: 600; }
+        .frequency .period { color: #666666; font-size: 9px; }
+        .result[aria-selected="true"] .frequency { color: #c8dbea; }
+        .result[aria-selected="true"] .frequency .period { color: #89a9c0; }
         .empty, .status {
           padding: 13px 14px;
           color: #9d9d9d;
@@ -226,7 +235,6 @@
       button.className = "result";
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(index === palette.selected));
-      button.addEventListener("mouseenter", () => select(index));
       button.addEventListener("click", () => void execute(index));
 
       const prefix = document.createElement("span");
@@ -247,6 +255,22 @@
       }
 
       button.append(prefix, main);
+      if (item.recentUses) {
+        const frequency = document.createElement("span");
+        frequency.className = "frequency";
+        frequency.title = `${item.recentUses} successful use${item.recentUses === 1 ? "" : "s"} in the last 90 days`;
+
+        const count = document.createElement("span");
+        count.className = "count";
+        count.textContent = item.recentUses;
+
+        const period = document.createElement("span");
+        period.className = "period";
+        period.textContent = "/ Q";
+
+        frequency.append(count, period);
+        button.append(frequency);
+      }
       palette.resultsElement.append(button);
     });
   }
@@ -363,4 +387,6 @@
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
   }
+
+  void openPalette();
 })();

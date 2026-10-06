@@ -2,7 +2,8 @@
 
 import "./palette-core.js";
 
-const { bookmarkletCode, findBookmarklets, githubTarget } = globalThis.AnandPaletteCore;
+const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts } =
+  globalThis.AnandPaletteCore;
 
 const command = (id, label, detail, { keywords = [], repeatable = true } = {}) => ({
   id: `command:${id}`,
@@ -32,10 +33,27 @@ const COMMANDS = [
 ];
 const COMMAND_BY_ID = new Map(COMMANDS.map((item) => [item.id, item]));
 
-chrome.commands.onCommand.addListener(async (name) => {
+chrome.commands.onCommand.addListener(async (name, tab) => {
   if (name !== "open-command-palette") return;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) await chrome.tabs.sendMessage(tab.id, { type: "open-palette" }).catch(() => {});
+  const tabId =
+    tab?.id ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id;
+  if (!tabId) return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["palette-core.js", "content-script.js"],
+    });
+  } catch (error) {
+    console.warn("Command Palette could not open on this page.", error);
+  }
+});
+
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  if (reason !== "install") return;
+  const command = (await chrome.commands.getAll()).find(({ name }) => name === "open-command-palette");
+  if (!command?.shortcut) {
+    console.warn("Command Palette shortcut is unavailable. Set it at edge://extensions/shortcuts.");
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -61,11 +79,11 @@ function reply(promise, sendResponse) {
 }
 
 async function getPaletteData() {
-  const [tabs, groups, [bookmarkRoot], { usage = {} }] = await Promise.all([
+  const [tabs, groups, [bookmarkRoot], { usage = {}, logs = [] }] = await Promise.all([
     chrome.tabs.query({}),
     chrome.tabGroups.query({}),
     chrome.bookmarks.getTree(),
-    chrome.storage.local.get(["usage"]),
+    chrome.storage.local.get(["usage", "logs"]),
   ]);
 
   const groupById = new Map(groups.map((group) => [group.id, group]));
@@ -92,7 +110,12 @@ async function getPaletteData() {
     detail: "Bookmarklet",
   }));
 
-  return { items: [...COMMANDS, ...bookmarkItems, ...tabItems], usage };
+  const recentUses = recentUsageCounts(logs);
+  const items = [...COMMANDS, ...bookmarkItems, ...tabItems].map((item) => ({
+    ...item,
+    recentUses: recentUses[item.id] || 0,
+  }));
+  return { items, usage };
 }
 
 async function executeItem(id, tabId, { repeated = false, preserveLast = false } = {}) {

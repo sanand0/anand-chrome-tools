@@ -4,19 +4,12 @@
   "name": "Anand Chrome Tools",
   "version": "0.2.0",
   "description": "Small personal browser automations and shortcuts.",
-  "permissions": ["bookmarks", "storage", "tabGroups", "tabs", "userScripts"],
+  "permissions": ["bookmarks", "scripting", "storage", "tabGroups", "tabs", "userScripts"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "service-worker.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["palette-core.js", "content-script.js"],
-      "run_at": "document_start"
-    }
-  ],
   "commands": {
     "open-command-palette": {
       "suggested_key": {

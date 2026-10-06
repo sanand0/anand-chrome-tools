@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 await import("./palette-core.js");
-const { bookmarkletCode, findBookmarklets, githubTarget, rankItems } =
+const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts, rankItems } =
   globalThis.AnandPaletteCore;
 const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
 
@@ -14,28 +14,51 @@ test("manifest wires the command palette with only required capabilities", () =>
   assert.equal(manifest.background?.type, "module");
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["bookmarks", "storage", "tabGroups", "tabs", "userScripts"].sort(),
+    ["bookmarks", "scripting", "storage", "tabGroups", "tabs", "userScripts"].sort(),
   );
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
-  assert.deepEqual(manifest.content_scripts?.[0]?.js, ["palette-core.js", "content-script.js"]);
-  assert.equal(manifest.content_scripts?.[0]?.run_at, "document_start");
+  assert.equal(manifest.content_scripts, undefined);
   assert.ok(manifest.commands?.["open-command-palette"]);
   assert.deepEqual(manifest.commands["open-command-palette"].suggested_key, {
     default: "Ctrl+Shift+Space",
   });
 });
 
-test("manifest references existing local files", () => {
-  const files = [
-    manifest.background.service_worker,
-    ...manifest.content_scripts.flatMap((script) => script.js),
-  ];
+test("manifest and on-demand injection reference existing local files", () => {
+  const files = ["service-worker.js", "palette-core.js", "content-script.js"];
   for (const file of files) assert.ok(existsSync(new URL(file, import.meta.url)), file);
+
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /chrome\.scripting\.executeScript/);
+  assert.match(worker, /files: \["palette-core\.js", "content-script\.js"\]/);
 });
 
-test("Ctrl+Shift+Space is handled only through the extension command", () => {
+test("palette is injected on demand and replaces any previous instance", () => {
   const source = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /BracketLeft|ctrlKey|shiftKey/);
+  assert.doesNotMatch(source, /BracketLeft|ctrlKey|shiftKey|open-palette/);
+  assert.match(source, /querySelector\("anand-command-palette"\)\?\.remove\(\)/);
+  assert.match(source, /void openPalette\(\)/);
+});
+
+test("hover is visual only; keyboard selection controls Enter", () => {
+  const source = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
+  assert.match(source, /\.result:hover \{ background:/);
+  assert.doesNotMatch(source, /mouseenter/);
+  assert.match(source, /button\.addEventListener\("click", \(\) => void execute\(index\)\)/);
+  assert.match(source, /event\.key === "Enter"[\s\S]*execute\(palette\.selected\)/);
+});
+
+test("recent usage counts successful executions in the trailing quarter", () => {
+  const now = Date.parse("2026-10-06T00:00:00Z");
+  const logs = [
+    { id: "command:a", status: "success", timestamp: new Date(now - 1 * 864e5).toISOString() },
+    { id: "command:a", status: "success", timestamp: new Date(now - 89 * 864e5).toISOString() },
+    { id: "command:a", status: "success", timestamp: new Date(now - 91 * 864e5).toISOString() },
+    { id: "command:a", status: "error", timestamp: new Date(now - 2 * 864e5).toISOString() },
+    { id: "command:b", status: "success", timestamp: new Date(now - 10 * 864e5).toISOString() },
+  ];
+
+  assert.deepEqual(recentUsageCounts(logs, now), { "command:a": 2, "command:b": 1 });
 });
 
 test("exact matches beat fuzzy and frecent matches", () => {

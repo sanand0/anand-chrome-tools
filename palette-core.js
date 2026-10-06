@@ -116,6 +116,18 @@
     return 50 * Math.log2(count + 1) + 300 * Math.exp(-ageDays / 7);
   }
 
+  function recentUsageCounts(logs, now = Date.now()) {
+    const cutoff = now - 90 * 86_400_000;
+    const counts = {};
+    for (const { id, status, timestamp } of logs) {
+      const time = Date.parse(timestamp);
+      if (status === "success" && id && time >= cutoff && time <= now) {
+        counts[id] = (counts[id] || 0) + 1;
+      }
+    }
+    return counts;
+  }
+
   function parseQuery(rawQuery) {
     const raw = String(rawQuery ?? "");
     const type = TYPE_FOR_PREFIX[raw[0]] ?? null;
@@ -197,6 +209,7 @@
     bookmarkletCode,
     findBookmarklets,
     githubTarget,
+    recentUsageCounts,
     parseQuery,
     rankItems,
   };
