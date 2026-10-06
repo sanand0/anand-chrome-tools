@@ -40,6 +40,13 @@ test("palette is injected on demand and replaces any previous instance", () => {
   assert.match(source, /void openPalette\(\)/);
 });
 
+test("search input stays in light DOM so host-page keyboard handlers recognize it", () => {
+  const source = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
+  assert.match(source, /input\.slot = "search"/);
+  assert.match(source, /<slot name="search"><\/slot>/);
+  assert.doesNotMatch(source, /shadow\.querySelector\("input"\)/);
+});
+
 test("hover is visual only; keyboard selection controls Enter", () => {
   const source = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
   assert.match(source, /\.result:hover \{ background:/);

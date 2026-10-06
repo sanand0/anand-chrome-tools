@@ -16,6 +16,22 @@
     document.querySelector("anand-command-palette")?.remove();
     const host = document.createElement("anand-command-palette");
     host.style.setProperty("all", "initial", "important");
+
+    // Keep the input in light DOM so host-page keyboard handlers see a real input, not the shadow host.
+    const input = document.createElement("input");
+    input.slot = "search";
+    input.type = "text";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-controls", "anand-command-palette-results");
+    input.autocomplete = "off";
+    input.autocapitalize = "off";
+    input.spellcheck = false;
+    input.placeholder = DEFAULT_PLACEHOLDER;
+    input.style.cssText =
+      'all:initial!important;box-sizing:border-box!important;display:block!important;width:100%!important;padding:13px 14px!important;color:#f0f0f0!important;background:transparent!important;border:0!important;outline:0!important;font:15px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;';
+    host.append(input);
+
     const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `
       <style>
@@ -40,17 +56,6 @@
           border-bottom: 1px solid #3d3d3d;
           background: #1f1f1f;
         }
-        input {
-          box-sizing: border-box;
-          width: 100%;
-          padding: 13px 14px;
-          color: #f0f0f0;
-          background: transparent;
-          border: 0;
-          outline: 0;
-          font: 15px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        }
-        input::placeholder { color: #8c8c8c; }
         .results {
           max-height: min(500px, 62vh);
           overflow: auto;
@@ -139,18 +144,7 @@
         }
       </style>
       <dialog aria-label="Command Palette">
-        <div class="search">
-          <input
-            type="text"
-            role="combobox"
-            aria-autocomplete="list"
-            aria-controls="anand-command-palette-results"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            placeholder="${DEFAULT_PLACEHOLDER}"
-          >
-        </div>
+        <div class="search"><slot name="search"></slot></div>
         <div class="results" id="anand-command-palette-results" role="listbox"></div>
         <div class="status" hidden></div>
         <footer>
@@ -166,7 +160,6 @@
 
     (document.documentElement || document.body).append(host);
     const dialog = shadow.querySelector("dialog");
-    const input = shadow.querySelector("input");
     const resultsElement = shadow.querySelector(".results");
     const status = shadow.querySelector(".status");
     if (!(dialog instanceof HTMLDialogElement) || !(input instanceof HTMLInputElement)) {
