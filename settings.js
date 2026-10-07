@@ -29,6 +29,7 @@ chooseButton?.addEventListener("click", async () => {
       mode: "readwrite",
     });
     await setDataDirectory(directory);
+    await chrome.runtime.sendMessage({ type: "reload-title-prefixes" });
     setStatus("Folder connected.");
     await syncNow();
   } catch (error) {
@@ -66,7 +67,7 @@ async function refresh() {
   const synced = lastLogSyncAt ? ` Last synced ${formatTime(lastLogSyncAt)}.` : "";
   detail.textContent = directory
     ? `${pending} pending action${pending === 1 ? "" : "s"}.${synced}`
-    : "Choose a folder to archive actions once daily into monthly UTC JSONL files.";
+    : "Choose a folder to archive actions and page title preferences.";
 
   syncButton.disabled = !directory || !pending;
   disconnectButton.disabled = !directory;

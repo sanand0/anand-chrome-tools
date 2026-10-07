@@ -134,6 +134,45 @@
     return { type, query: (type ? raw.slice(1) : raw).trim() };
   }
 
+  function parseCommandInput(rawInput, names = []) {
+    const input = String(rawInput ?? "").trimStart();
+    const match = input.match(/^([\p{L}\p{N}_-]+)(\s*:|\s+)(.*)$/su);
+    if (!match) return null;
+
+    const name = match[1].toLowerCase();
+    if (names.length && !names.includes(name)) return null;
+    return {
+      name,
+      argument: match[3].trim(),
+      separator: match[2].includes(":") ? ":" : " ",
+    };
+  }
+
+  function commandModeItems(items, rawInput, names = []) {
+    const command = parseCommandInput(rawInput, names);
+    if (!command) return null;
+
+    const related = items.filter((item) => item.commandMode === command.name);
+    if (!command.argument) return related;
+
+    const typed = String(rawInput).trim().replace(/\s+/g, " ").toLowerCase();
+    const exact = related.find(
+      (item) => item.typedCommand?.replace(/\s+/g, " ").toLowerCase() === typed,
+    );
+    if (exact) return [exact, ...related.filter((item) => item !== exact && item.typedCommand)];
+
+    return [
+      {
+        id: `typed-command:${command.name}`,
+        type: "typed-command",
+        prefix: ">",
+        label: String(rawInput).trim(),
+        detail: `Run ${command.name} command`,
+      },
+      ...related.filter((item) => item.typedCommand),
+    ];
+  }
+
   function rankItems(items, rawQuery, usage = {}, now = Date.now()) {
     const { type, query } = parseQuery(rawQuery);
     return items
@@ -207,9 +246,11 @@
 
   globalThis.AnandPaletteCore = {
     bookmarkletCode,
+    commandModeItems,
     findBookmarklets,
     githubTarget,
     recentUsageCounts,
+    parseCommandInput,
     parseQuery,
     rankItems,
   };

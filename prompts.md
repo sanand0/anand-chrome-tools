@@ -1,15 +1,15 @@
 # Prompts
 
-## Add filesystem access, 07 Oct 2026
+## Log to filesystem and add titles, 07 Oct 2026
 
-<!-- Extension File Access Implementation: https://chatgpt.com/c/6ac58504-82f8-83ec-bd3c-4892ff71e236 (2026-10-07T08:09:44+08:00) -->
+<!-- 🔸commit Anand Chrome Tools - File system and Tab Titles: https://chatgpt.com/c/6ac58504-82f8-83ec-bd3c-4892ff71e236 (2026-10-07T10:26:16+08:00) -->
 
-Can a Chrome/Edge browser extension like [LocalMCP2](/plugins/plugin_asdk_app_6ab0b6c561508191882e58b23665db3e) ~/code/anand-chrome-tools/ get permission to be able to read, write, append to files in a local directory? I'd like to maintain a log of actions, etc. in a local directory. What would it take to do that? I mean, does the user give permissions upfront during installation or something else? How do users specific WHICH directory to allow access for and how can they change that? What's the easiest way to implement this in ~/code/anand-chrome-tools?
+Can a Chrome/Edge browser extension like @LocalMCP2 ~/code/anand-chrome-tools/ get permission to be able to read, write, append to files in a local directory? I'd like to maintain a log of actions, etc. in a local directory. What would it take to do that? I mean, does the user give permissions upfront during installation or something else? How do users specific WHICH directory to allow access for and how can they change that? What's the easiest way to implement this in ~/code/anand-chrome-tools?
 
 Treat these as sample use cases I'm solving for (though I'll likely add much more to the directory).
 
-* Whenever the user performs an action, I will log it in actions.jsonl
-* The user can annotate any website and I'll store that in notes.jsonl and it'll be visible when they open that page
+- Whenever the user performs an action, I will log it in actions.jsonl
+- The user can annotate any website and I'll store that in notes.jsonl and it'll be visible when they open that page
 
 For anything you're unsure of, feel free to test and verify. But when using agent-browser with CDP localhost:9222 try using background operations (see devtools skill) as much as possible, to avoid disturbing my browser, and avoid changing tabs you didn't open.
 
@@ -21,6 +21,43 @@ Think about the simplest, most lightweight (resource-wise AND code-wise) impleme
 
 Run and test - or let me know what to do and I'll test it.
 
+---
+
+That worked. Commit to the repo (including the prompts.md I changed)
+
+Now, I'd like to implement a "Title" command. If I type "Title: some text here" or "title: some text here" or even "title: prefix: more text", it should append to a file in the file system a note saying that as of this timestamp, I decided to prefix the title of this page with everything after the first colon (whitespace-trimmed). When I come back to that page, if the title doesn't already start with that prefix, it should automatically add it. This is useful for adding context to pages you revisit later.
+
+Also implement a "Title clear" command that removes the prefix from the page (if it exists).
+
+What file format approach would be best to implement this? Take a look at my open tabs history in ~/Documents/data/open-tabs/ - the unique set of URLs in these is probably the number of pages I would annotate over that time period - and it might grow, but unlikely to more than double. If this extension lasts 3 years, I'd be morethan happy, so no need to plan for beyond that.
+
+This is the pattern for a broader set of command options. I want to be able to type "Command: some text here" or "command: some text here" and it should pass the text to the command handler. For now, the only command is "Title", but in the future, I want to be able to add more commands. The command handler should be able to parse the text and decide what to do with it.
+
+What's the cleanest - easy to read, short code, minimal changes, minimal features, most robust - way to implement this?
+
+---
+
+I'd like "Title" and "Title clear" to appear as an explicit commands I can select. Selecting "Title" is the same as typing "Title: " in the search box. Similarly for "Title clear". That makes discovery easier. Also update docs - think about an end user reading the README.md for the first time and help them understand.
+
+---
+
+Yes, the new commands appear. But when I type "Title clear" or even start typing anything after "Title " the "Title clear" command vanishes. When I type "title clear" it does clear the title but it's not visible in the UI. Again, I want an elegant change - not something that just fixes this issue but the general approach.
+
+---
+
+When logging the title action in the actions-yyyy-mm.jsonl and internally, also log the URL and preserve it. Keep in mind that future actions may add other fields. I prefer flat over nested, but still, if you strongly think that for my own good it's better to nest at least one level, that's fine. Go ahead and implement.
+
+---
+
+It may make sense to log the URL for ALL commands, actually.
+
+---
+
+In the actions log, also log the title of the URL, apart from the URL. "title" as a keyword is probably fine here but feel free to change it if you think appropriate.
+
+---
+
+Add a 🔸at the start of each title when updating the tab title. That way, I'll know which tabs have a custom title. For example, if I say "title: hello" the tab should display "🔸hello" - but the action / log should just capture hello, not the 🔸 - which is purely a visual indicator.
 
 ## Add command palette, 05 Oct 2026
 
@@ -98,8 +135,6 @@ A subtle issue. When I trigger the popup, it shows a list of matches. If my mous
 ---
 
 On the right side of each match, could you also show whatever frequency of usage metric you're using, where available? For example, if it was clicked 4 times in the last quarter, then maybe "4 / Q" with 4 prominent? Or any visually appealing interface that shows the number not-overtly-prominently and the time period subtly.
-
-
 
 ## Scaffolding, 04 Oct 2026
 

@@ -2,10 +2,17 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { appendText } from "./filesystem.js";
+import { appendText, replayTitleEvents } from "./filesystem.js";
 await import("./palette-core.js");
-const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts, rankItems } =
-  globalThis.AnandPaletteCore;
+const {
+  bookmarkletCode,
+  commandModeItems,
+  findBookmarklets,
+  githubTarget,
+  parseCommandInput,
+  recentUsageCounts,
+  rankItems,
+} = globalThis.AnandPaletteCore;
 const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
 
 test("manifest wires the command palette with only required capabilities", () => {
@@ -45,6 +52,83 @@ test("manifest and on-demand injection reference existing local files", () => {
   assert.match(worker, /files: \["palette-core\.js", "content-script\.js"\]/);
   assert.match(worker, /name === "new-tab-right"/);
   assert.match(worker, /index: current\.index \+ 1/);
+});
+
+test("typed commands preserve everything after the first colon", () => {
+  assert.deepEqual(parseCommandInput("Title: some text", ["title"]), {
+    name: "title",
+    argument: "some text",
+    separator: ":",
+  });
+  assert.deepEqual(parseCommandInput("title: prefix: more text", ["title"]), {
+    name: "title",
+    argument: "prefix: more text",
+    separator: ":",
+  });
+  assert.deepEqual(parseCommandInput("TITLE clear", ["title"]), {
+    name: "title",
+    argument: "clear",
+    separator: " ",
+  });
+  assert.deepEqual(parseCommandInput("Title: ", ["title"]), {
+    name: "title",
+    argument: "",
+    separator: ":",
+  });
+  assert.deepEqual(parseCommandInput("Title ", ["title"]), {
+    name: "title",
+    argument: "",
+    separator: " ",
+  });
+  assert.equal(parseCommandInput("unknown: value", ["title"]), null);
+});
+
+test("command mode keeps related commands visible while accepting free text", () => {
+  const items = [
+    {
+      id: "command:title",
+      type: "command",
+      label: "Title",
+      commandMode: "title",
+      prefill: "Title: ",
+    },
+    {
+      id: "command:title-clear",
+      type: "command",
+      label: "Title clear",
+      commandMode: "title",
+      typedCommand: "Title clear",
+    },
+    { id: "command:other", type: "command", label: "Other" },
+  ];
+
+  assert.deepEqual(
+    commandModeItems(items, "Title ", ["title"]).map(({ id }) => id),
+    ["command:title", "command:title-clear"],
+  );
+  assert.deepEqual(
+    commandModeItems(items, "Title anything", ["title"]).map(({ id }) => id),
+    ["typed-command:title", "command:title-clear"],
+  );
+  assert.deepEqual(
+    commandModeItems(items, "title clear", ["title"]).map(({ id }) => id),
+    ["command:title-clear"],
+  );
+  assert.deepEqual(
+    commandModeItems(items, "Title: clear", ["title"]).map(({ id }) => id),
+    ["typed-command:title", "command:title-clear"],
+  );
+  assert.equal(commandModeItems(items, "titles anything", ["title"]), null);
+});
+
+test("title event replay materializes the latest prefix per URL", () => {
+  const text = [
+    JSON.stringify({ timestamp: "2026-10-01T00:00:00Z", url: "https://a.test/", prefix: "A" }),
+    "{bad json",
+    JSON.stringify({ timestamp: "2026-10-02T00:00:00Z", url: "https://b.test/", prefix: "B" }),
+    JSON.stringify({ timestamp: "2026-10-03T00:00:00Z", url: "https://a.test/", prefix: null }),
+  ].join("\n");
+  assert.deepEqual(replayTitleEvents(text), { "https://b.test/": "B" });
 });
 
 test("action log append preserves existing bytes and closes the file", async () => {
@@ -103,6 +187,47 @@ test("settings page selects a read-write directory and can force a sync", () => 
   assert.match(script, /showDirectoryPicker/);
   assert.match(script, /mode: "readwrite"/);
   assert.match(script, /type: "sync-action-logs"/);
+});
+
+test("command mode drives palette results and sends typed input to the worker", () => {
+  const source = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
+  assert.match(source, /commandModeItems\([\s\S]*palette\.input\.value,[\s\S]*palette\.typedCommandNames/);
+  assert.match(source, /type: "execute-typed-command", text: typedText, id: item\.id/);
+});
+
+test("discoverable parameterized commands can prefill or submit typed input", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  const content = readFileSync(new URL("./content-script.js", import.meta.url), "utf8");
+  assert.match(worker, /command\("title", "Title",[\s\S]*prefill: "Title: "/);
+  assert.match(worker, /command\("title-clear", "Title clear",[\s\S]*typedCommand: "Title clear"/);
+  assert.match(content, /if \(item\.prefill\)[\s\S]*palette\.input\.value = item\.prefill/);
+  assert.match(content, /item\.type === "typed-command" \? palette\.input\.value : item\.typedCommand/);
+  assert.match(worker, /commandMode: "title"/);
+});
+
+test("Title command persists exact-URL events and reapplies decorated prefixes", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const TITLE_MARKER = "🔸"/);
+  assert.match(worker, /title: \{ run: runTitleCommand \}/);
+  assert.match(worker, /separator === " " && argument\.toLowerCase\(\) === "clear"/);
+  assert.match(worker, /appendText\(directory, "titles\.jsonl",/);
+  assert.match(worker, /chrome\.tabs\.onUpdated\.addListener/);
+  assert.match(worker, /const prefix = titlePrefixes\[url\]/);
+  assert.match(worker, /const decorated = `\$\{TITLE_MARKER\}\$\{prefix\}`/);
+  assert.match(worker, /args: \[previousPrefix, prefix, TITLE_MARKER\]/);
+});
+
+test("all logged palette actions preserve invoking page context and flat extra fields", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const fields = await actionContextFields\(tabId\)/);
+  assert.match(worker, /const fields = \{ \.\.\.commandFields, \.\.\.\(await actionContextFields\(tabId\)\) \}/);
+  assert.match(worker, /url: tab\.url \|\| tab\.pendingUrl \|\| ""/);
+  assert.match(worker, /title: stripTitleMarker\(tab\.title \|\| ""\)/);
+  assert.match(worker, /return title\.startsWith\(TITLE_MARKER\) \? title\.slice\(TITLE_MARKER\.length\) : title/);
+  assert.match(worker, /fields = \{\},[\s\S]*const entry = \{[\s\S]*\.\.\.fields,[\s\S]*eventId:/);
+  assert.match(worker, /const coreFields = \[[\s\S]*"url",[\s\S]*"title"/);
+  assert.match(worker, /Object\.keys\(entry\)[\s\S]*!coreFields\.includes\(field\)/);
+  assert.match(worker, /const fields = \[\.\.\.coreFields, \.\.\.extras\]/);
 });
 
 test("palette is injected on demand and replaces any previous instance", () => {

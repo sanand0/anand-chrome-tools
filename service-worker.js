@@ -1,15 +1,27 @@
 // @ts-check
 
 import "./palette-core.js";
-import { appendText, getDataDirectory, getDirectoryPermission } from "./filesystem.js";
+import {
+  appendText,
+  getDataDirectory,
+  getDirectoryPermission,
+  readText,
+  replayTitleEvents,
+} from "./filesystem.js";
 
-const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts } =
+const { bookmarkletCode, findBookmarklets, githubTarget, parseCommandInput, recentUsageCounts } =
   globalThis.AnandPaletteCore;
 
 const LOG_SYNC_ALARM = "sync-action-logs";
 const RECENT_LOG_MS = 90 * 24 * 60 * 60 * 1000;
+const TITLE_MARKER = "🔸";
 
-const command = (id, label, detail, { keywords = [], repeatable = true } = {}) => ({
+const command = (
+  id,
+  label,
+  detail,
+  { keywords = [], repeatable = true, prefill, typedCommand, commandMode } = {},
+) => ({
   id: `command:${id}`,
   type: "command",
   prefix: ">",
@@ -17,6 +29,9 @@ const command = (id, label, detail, { keywords = [], repeatable = true } = {}) =
   detail,
   ...(keywords.length ? { texts: [label, ...keywords] } : {}),
   ...(repeatable ? {} : { repeatable: false }),
+  ...(prefill ? { prefill } : {}),
+  ...(typedCommand ? { typedCommand } : {}),
+  ...(commandMode ? { commandMode } : {}),
 });
 
 const COMMANDS = [
@@ -27,10 +42,20 @@ const COMMANDS = [
     "Switch between a GitHub repository and its GitHub Pages site",
     { keywords: ["GitHub Pages repository repo"] },
   ),
-  command("repeat-last", "Repeat last command", "Run the last successful palette item again", {
+  command("title", "Title", "Set a persistent prefix for this page title", {
+    commandMode: "title",
+    prefill: "Title: ",
     repeatable: false,
   }),
-  command("settings", "Settings", "Choose local data folder and sync action logs", {
+  command("title-clear", "Title clear", "Remove this page's saved title prefix", {
+    commandMode: "title",
+    typedCommand: "Title clear",
+    repeatable: false,
+  }),
+  command("repeat-last", "Repeat last command", "Run the last successful repeatable palette item again", {
+    repeatable: false,
+  }),
+  command("settings", "Settings", "Choose local data folder and sync local data", {
     repeatable: false,
   }),
   command("export-logs", "Export command logs", "Download the local command log as TSV", {
@@ -39,6 +64,9 @@ const COMMANDS = [
   }),
 ];
 const COMMAND_BY_ID = new Map(COMMANDS.map((item) => [item.id, item]));
+const TYPED_COMMANDS = {
+  title: { run: runTitleCommand },
+};
 
 chrome.commands.onCommand.addListener(async (name, tab) => {
   if (!["open-command-palette", "new-tab-right"].includes(name)) return;
@@ -65,6 +93,11 @@ chrome.commands.onCommand.addListener(async (name, tab) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!changeInfo.url && !changeInfo.title && changeInfo.status !== "complete") return;
+  void applyStoredTitlePrefix(tabId, tab).catch(() => {});
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== LOG_SYNC_ALARM) return;
   void syncActionLogs().catch((error) => {
@@ -87,6 +120,19 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "palette-data") return reply(getPaletteData(), sendResponse);
   if (message?.type === "sync-action-logs") return reply(syncActionLogs(), sendResponse);
+  if (message?.type === "reload-title-prefixes") return reply(reloadTitlePrefixes(), sendResponse);
+
+  if (message?.type === "execute-typed-command") {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: "No active web page for this command." });
+      return false;
+    }
+    return reply(
+      executeTypedCommand(String(message.text), tabId, String(message.id || "")),
+      sendResponse,
+    );
+  }
 
   if (message?.type === "execute-item") {
     const tabId = sender.tab?.id;
@@ -144,55 +190,152 @@ async function getPaletteData() {
     ...item,
     recentUses: recentUses[item.id] || 0,
   }));
-  return { items, usage };
+  return { items, typedCommandNames: Object.keys(TYPED_COMMANDS), usage };
 }
 
 async function executeItem(id, tabId, { repeated = false, preserveLast = false } = {}) {
   const item = await resolveItem(id);
   if (!item) throw new Error("That palette item no longer exists.");
+  const fields = await actionContextFields(tabId);
 
-  if (id === "command:repeat-last") return repeatLast(item, tabId);
+  if (id === "command:repeat-last") return repeatLast(item, tabId, fields);
   if (id === "command:export-logs") {
-    await recordRun(item, { status: "success", saveLast: false });
+    await recordRun(item, { status: "success", saveLast: false }, fields);
     return exportLogs();
   }
 
   try {
     const result = await runItem(item, tabId);
-    await recordRun(item, {
-      status: "success",
-      repeated,
-      saveLast: !preserveLast && item.repeatable !== false,
-    });
+    await recordRun(
+      item,
+      {
+        status: "success",
+        repeated,
+        saveLast: !preserveLast && item.repeatable !== false,
+      },
+      fields,
+    );
     return result ?? {};
   } catch (error) {
-    await recordRun(item, {
-      status: "error",
-      repeated,
-      error: errorMessage(error),
-      saveLast: false,
-    });
+    await recordRun(
+      item,
+      {
+        status: "error",
+        repeated,
+        error: errorMessage(error),
+        saveLast: false,
+      },
+      fields,
+    );
     throw error;
   }
 }
 
-async function repeatLast(item, tabId) {
+async function executeTypedCommand(text, tabId, itemId = "") {
+  const parsed = parseCommandInput(text, Object.keys(TYPED_COMMANDS));
+  const command = parsed && TYPED_COMMANDS[parsed.name];
+  if (!parsed || !command) throw new Error("Unknown command.");
+
+  const item = COMMAND_BY_ID.get(itemId) || {
+    id: `command:${parsed.name}`,
+    type: "command",
+    label: text.trim(),
+    repeatable: false,
+  };
+  const commandFields = command.fields ? await command.fields(parsed, tabId) : {};
+  const fields = { ...commandFields, ...(await actionContextFields(tabId)) };
+
+  try {
+    const result = await command.run(parsed, tabId);
+    await recordRun(item, { status: "success", saveLast: false }, fields);
+    return result ?? {};
+  } catch (error) {
+    await recordRun(
+      item,
+      {
+        status: "error",
+        error: errorMessage(error),
+        saveLast: false,
+      },
+      fields,
+    );
+    throw error;
+  }
+}
+
+async function actionContextFields(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  return {
+    url: tab.url || tab.pendingUrl || "",
+    title: stripTitleMarker(tab.title || ""),
+  };
+}
+
+function stripTitleMarker(title) {
+  return title.startsWith(TITLE_MARKER) ? title.slice(TITLE_MARKER.length) : title;
+}
+
+async function runTitleCommand({ argument, separator }, tabId) {
+  if (!argument) throw new Error("Enter a title prefix.");
+  const tab = await chrome.tabs.get(tabId);
+  const url = tab.url || "";
+  if (!/^https?:/i.test(url)) throw new Error("Title works only on ordinary web pages.");
+
+  const { titlePrefixes = {} } = await chrome.storage.local.get(["titlePrefixes"]);
+  const previous = titlePrefixes[url] || "";
+  const clear = separator === " " && argument.toLowerCase() === "clear";
+  const prefix = clear ? "" : argument;
+
+  if (clear && !previous) return;
+  if (prefix === previous) {
+    await updateTabTitle(tabId, previous, prefix);
+    return;
+  }
+
+  const directory = await getDataDirectory();
+  if (!directory || (await getDirectoryPermission(directory)) !== "granted") {
+    throw new Error("Connect the local data folder in Settings first.");
+  }
+
+  const event = {
+    eventId: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    url,
+    prefix: prefix || null,
+  };
+  await appendText(directory, "titles.jsonl", `${JSON.stringify(event)}\n`);
+
+  if (prefix) titlePrefixes[url] = prefix;
+  else delete titlePrefixes[url];
+  await chrome.storage.local.set({ titlePrefixes });
+  await updateTabTitle(tabId, previous, prefix);
+}
+
+async function repeatLast(item, tabId, fields) {
   const { lastRun } = await chrome.storage.local.get(["lastRun"]);
   if (!lastRun?.id) {
-    await recordRun(item, { status: "error", error: "No previous command.", saveLast: false });
+    await recordRun(
+      item,
+      { status: "error", error: "No previous command.", saveLast: false },
+      fields,
+    );
     throw new Error("No previous command to repeat.");
   }
 
   try {
     const result = await executeItem(lastRun.id, tabId, { repeated: true, preserveLast: true });
-    await recordRun(item, { status: "success", saveLast: false });
+    await recordRun(item, { status: "success", saveLast: false }, fields);
     return result;
   } catch (error) {
-    await recordRun(item, {
-      status: "error",
-      error: errorMessage(error),
-      saveLast: false,
-    });
+    await recordRun(
+      item,
+      {
+        status: "error",
+        error: errorMessage(error),
+        saveLast: false,
+      },
+      fields,
+    );
     throw error;
   }
 }
@@ -282,9 +425,72 @@ async function toggleGithub(tabId) {
   await chrome.tabs.update(tabId, { url: target.url });
 }
 
+async function applyStoredTitlePrefix(tabId, tab) {
+  const url = tab.url || tab.pendingUrl || "";
+  if (!/^https?:/i.test(url)) return;
+
+  const { titlePrefixes = {} } = await chrome.storage.local.get(["titlePrefixes"]);
+  const prefix = titlePrefixes[url];
+  const decorated = `${TITLE_MARKER}${prefix}`;
+  if (!prefix || (tab.title || "").startsWith(decorated)) return;
+  await updateTabTitle(tabId, "", prefix);
+}
+
+async function updateTabTitle(tabId, previousPrefix, prefix) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (previous, next, marker) => {
+      let title = document.title;
+      const decoratedPrevious = previous && `${marker}${previous}`;
+
+      if (decoratedPrevious && title.startsWith(decoratedPrevious)) {
+        title = title.slice(decoratedPrevious.length).replace(/^\s+/, "");
+      } else if (previous && title.startsWith(previous)) {
+        // Migrate titles created before the visual marker was introduced.
+        title = title.slice(previous.length).replace(/^\s+/, "");
+      }
+
+      const decoratedNext = next && `${marker}${next}`;
+      if (decoratedNext && !title.startsWith(decoratedNext)) {
+        // A matching undecorated prefix may be a title created by an older extension version.
+        title = title.startsWith(next) ? `${marker}${title}` : `${decoratedNext} ${title}`;
+      }
+      if (title !== document.title) document.title = title;
+    },
+    args: [previousPrefix, prefix, TITLE_MARKER],
+  });
+}
+
+async function reloadTitlePrefixes() {
+  const directory = await getDataDirectory();
+  if (!directory) return { loaded: 0, reason: "no-directory" };
+  if ((await getDirectoryPermission(directory)) !== "granted") {
+    return { loaded: 0, reason: "permission-required" };
+  }
+
+  const titlePrefixes = replayTitleEvents(await readText(directory, "titles.jsonl"));
+  await chrome.storage.local.set({ titlePrefixes });
+  return { loaded: Object.keys(titlePrefixes).length };
+}
+
 async function exportLogs() {
   const { logs = [] } = await chrome.storage.local.get(["logs"]);
-  const fields = ["timestamp", "type", "name", "id", "status", "repeated", "error"];
+  const coreFields = [
+    "eventId",
+    "timestamp",
+    "type",
+    "name",
+    "id",
+    "url",
+    "title",
+    "status",
+    "repeated",
+    "error",
+  ];
+  const extras = [
+    ...new Set(logs.flatMap((entry) => Object.keys(entry)).filter((field) => !coreFields.includes(field))),
+  ].sort();
+  const fields = [...coreFields, ...extras];
   const rows = logs.map((entry) => fields.map((field) => tsvCell(entry[field])).join("\t"));
   return {
     effect: {
@@ -298,6 +504,7 @@ async function exportLogs() {
 async function recordRun(
   item,
   { status, repeated = false, error = "", saveLast = status === "success" && item.repeatable !== false },
+  fields = {},
 ) {
   const now = Date.now();
   const { logs = [], usage = {}, pendingLogs = [] } = await chrome.storage.local.get([
@@ -306,6 +513,7 @@ async function recordRun(
     "pendingLogs",
   ]);
   const entry = {
+    ...fields,
     eventId: crypto.randomUUID(),
     timestamp: new Date(now).toISOString(),
     type: item.type,

@@ -1,47 +1,56 @@
 # Anand Chrome Tools
 
-A small personal Edge/Chrome extension. Its main feature is a VS Code-style command palette for tabs, bookmarklets, and browser actions.
+A small, dependency-free Edge/Chrome extension for keyboard-first browser actions. Its main interface is a VS Code-style command palette for switching tabs, running bookmarklets, and executing commands.
 
 ## Install
 
 1. Open `edge://extensions` or `chrome://extensions`.
 2. Enable **Developer mode**.
 3. Choose **Load unpacked** and select this directory.
-4. Open the extension's **Details** page and enable **Allow User Scripts**. This is required to run bookmarklets.
+4. Open the extension's **Details** page and enable **Allow User Scripts** if you want to run bookmarklets.
 
-The palette is injected only when invoked, so it also works on ordinary tabs that were already open before the extension was installed or reloaded.
+For features that save files locally, open the palette, choose **Settings**, then choose a data folder. The browser grants the extension access only to that folder.
 
 ## Use
 
-Press **Ctrl+Shift+Space** for the command palette. Press **Ctrl+Shift+.** to open a new tab immediately to the right of the current tab.
+Press **Ctrl+Shift+Space** to open the command palette. Press **Ctrl+Shift+.** to open a new tab immediately to the right of the current tab.
 
-Search everything together, or start with a prefix:
+Start typing to search everything, or narrow the search with:
 
 - `@` — open tabs across all windows, searched by title, tab group, and URL.
 - `!` — bookmarklets, searched by name.
-- `>` — built-in commands.
+- `>` — commands.
 
-Bookmarklets are read from any folder named **Bookmarklets** anywhere below the bookmarks bar. Nested folders are supported.
+Search is fuzzy and keyboard-oriented. For example, `one punch` matches `One-punch man`, `ideas pi` matches `Pi Durable Ideas`, and abbreviations such as `ocp` can match `Open Command Palette`. Frequently and recently used matches rank higher; `4 / Q` means four successful uses in the trailing 90 days.
 
-Search is forgiving and keyboard-oriented. Punctuation acts like a separator, multiple terms may appear in any order, and abbreviations work. For example:
+Bookmarklets are discovered recursively from any folder named **Bookmarklets** below the bookmarks bar.
 
-- `one punch` matches `One-punch man`.
-- `ideas pi` matches `Pi Durable Ideas`.
-- `ocp` matches `Open Command Palette`.
+## Commands
 
-Exact, prefix, and contiguous matches rank above fuzzy matches. Among similarly relevant results, frequently and recently used items rank higher. With an empty query, the palette is ordered by frecency. Where available, the right edge shows recent successful usage as `4 / Q`, where `Q` is the trailing 90 days.
-
-Built-in commands:
-
-- **Copy current page** — copy `[title](URL)`.
+- **Title** — select it, type a prefix, and press Enter. Selecting it is exactly like typing `Title: ` into the palette yourself. The prefix is applied immediately and automatically restored whenever you revisit that exact URL. Tabs with a saved prefix are visually marked with `🔸` at the start of the displayed title.
+- **Title clear** — remove the saved prefix for the current page. You can also type `Title clear` directly.
+- **Copy current page** — copy the current page as `[title](URL)`.
 - **Toggle Github** — switch between a GitHub repository and its standard GitHub Pages site when available.
 - **Repeat last command** — rerun the last successful repeatable palette item.
-- **Settings** — choose or change the local data folder and sync action logs.
-- **Export command logs** — download the recent local command history as TSV.
+- **Settings** — choose/change the local data folder and manually sync pending action logs.
+- **Export command logs** — download the recent in-browser command history as TSV.
 
-Every execution is written immediately to `chrome.storage.local`, which keeps the pending archive queue, total usage counts, and a rolling 90-day history for recent-use ranking. If a local data folder is connected in **Settings**, pending actions are appended once daily to `actions-YYYY-MM.jsonl`, grouped by the action timestamp's UTC month. **Sync now** flushes immediately. Changing or disconnecting the folder does not discard pending actions.
+Typed commands are case-insensitive. Once you enter a parameterized command such as `Title ` or `Title: `, the palette stays in that command mode: your free-text invocation remains runnable while related explicit commands such as **Title clear** stay visible. For Title, everything after the first colon is the prefix, so `title: Project X` and `Title: prefix: more text` both work. `Title clear` clears the prefix, while `Title: clear` deliberately sets the literal prefix `clear`.
 
-The palette works on normal `http://` and `https://` pages. Browser-internal or otherwise protected pages such as `edge://extensions` do not allow extension script injection, so the palette cannot open there. If the shortcut is missing because of a browser/extension conflict, assign it from `edge://extensions/shortcuts`.
+Title preferences are matched against the exact page URL, including its query string and fragment. The extension renders `🔸` immediately before your prefix and inserts one space between the prefix and the site's own title; for example, `Title: Project X —` displays as `🔸Project X — <site title>`. The marker is display-only: it is not stored in `titles.jsonl` and is stripped from action-log `title` values.
+
+## Local data
+
+The selected folder currently contains two kinds of data:
+
+- `titles.jsonl` — an append-only history of Title changes. Each line records the UTC timestamp, exact URL, and prefix; a `null` prefix means the saved title was cleared. Title changes are written immediately.
+- `actions-YYYY-MM.jsonl` — command/activity logs grouped by UTC month. Actions are first stored safely in `chrome.storage.local` and flushed to disk once daily, or immediately with **Settings → Sync now**. Every logged palette action records the invoking page's exact `url` and `title`; commands may add further action-specific fields at the top level.
+
+The current URL→title-prefix map and usage/frecency data live in `chrome.storage.local`, so normal browsing does not require rereading JSONL files. When you choose or change the data folder, `titles.jsonl` is replayed once to rebuild the title-prefix map.
+
+If the data folder is unavailable, Title commands fail visibly rather than pretending the change was saved. Pending action logs remain queued in browser storage until they can be written.
+
+The palette works on ordinary `http://` and `https://` pages. Browser-internal or protected pages such as `edge://extensions` do not allow extension script injection. If a shortcut is missing because of a conflict, set it at `edge://extensions/shortcuts`.
 
 ## Developer notes
 
@@ -59,7 +68,7 @@ The fuzzy matcher uses fzf-style space-separated AND terms with a compact fzy-st
 
 Bookmarklets use `chrome.userScripts.execute()` in the page's `MAIN` world. Stored bookmarklet URLs are percent-decoded once after removing `javascript:` before execution. This is why **Allow User Scripts** must be enabled.
 
-Action-log design is intentionally boring and low-overhead. The MV3 service worker can disappear after idle time, so pending actions and usage state live in `chrome.storage.local`, never only in memory. The first pending action schedules a single alarm for the next UTC midnight; a successful flush leaves no recurring alarm behind until another action is pending. There is no unload/exit flush because asynchronous work during service-worker shutdown is not reliable. The JSONL files are an append-only archive, not the live index, so worker startup does not reread or parse them. This avoids filesystem I/O on ordinary browser activity while preserving the existing fast local usage ranking. Monthly files also keep the File System Access API's copy-on-write append cost bounded.
+Local-data design is intentionally boring and low-overhead. Action logs stay flat: the logger owns the core fields (`eventId`, `timestamp`, `type`, `name`, `id`, `url`, `title`, `status`, `repeated`, `error`) and commands may add arbitrary action-specific fields. The `url` and `title` are captured before executing the action, so actions such as tab switches preserve the page from which they were invoked rather than the destination page. Both the in-browser log and JSONL archive preserve extra fields; TSV export discovers and includes them automatically. The MV3 service worker can disappear after idle time, so pending action logs, title-prefix state, and usage state live in `chrome.storage.local`, never only in memory. The first pending action log schedules a single alarm for the next UTC midnight; a successful flush leaves no recurring alarm behind until another action is pending. There is no unload/exit flush because asynchronous work during service-worker shutdown is not reliable. The JSONL files are an append-only archive, not the live index, so worker startup does not reread or parse them. This avoids filesystem I/O on ordinary browser activity while preserving the existing fast local usage ranking. Monthly files also keep the File System Access API's copy-on-write append cost bounded.
 
 The selected `FileSystemDirectoryHandle` lives in IndexedDB because file-system handles are structured-cloneable there. If the browser stops remembering write permission, Settings shows **Reconnect required** and **Sync now** can request it again from a user gesture. The queue stays in browser storage until a write succeeds. Each JSONL entry has an `eventId`; a crash in the very small interval after a file append but before queue acknowledgement can produce a duplicate on retry rather than lose an action.
 

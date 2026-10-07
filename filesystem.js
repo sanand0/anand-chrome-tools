@@ -38,6 +38,34 @@ export async function appendText(directory, filename, text) {
   }
 }
 
+export async function readText(directory, filename) {
+  try {
+    const handle = await directory.getFileHandle(filename);
+    return await (await handle.getFile()).text();
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") return "";
+    throw error;
+  }
+}
+
+export function replayTitleEvents(text) {
+  const prefixes = {};
+  for (const line of String(text ?? "").split(/\r?\n/).filter(Boolean)) {
+    try {
+      applyTitleEvent(prefixes, JSON.parse(line));
+    } catch {
+      // A manually edited/corrupt line should not hide otherwise valid title preferences.
+    }
+  }
+  return prefixes;
+}
+
+function applyTitleEvent(prefixes, event) {
+  if (!event?.url) return;
+  if (event.prefix === null) delete prefixes[event.url];
+  else if (typeof event.prefix === "string" && event.prefix) prefixes[event.url] = event.prefix;
+}
+
 function idbRequest(mode, operation) {
   return new Promise((resolve, reject) => {
     const open = indexedDB.open(DB_NAME, 1);

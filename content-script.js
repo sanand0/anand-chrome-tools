@@ -3,7 +3,7 @@
 (() => {
   "use strict";
 
-  const { parseQuery, rankItems } = globalThis.AnandPaletteCore;
+  const { commandModeItems, parseQuery, rankItems } = globalThis.AnandPaletteCore;
   const PLACEHOLDERS = {
     tab: "Search open tabs by title, group, or URL",
     bookmarklet: "Search bookmarklets by name",
@@ -174,6 +174,7 @@
       resultsElement,
       status,
       items: [],
+      typedCommandNames: [],
       usage: {},
       visible: [],
       selected: 0,
@@ -197,6 +198,7 @@
       if (!response?.ok) throw new Error(response?.error || "Could not load palette data.");
       if (!palette || palette.host !== host) return;
       palette.items = response.items || [];
+      palette.typedCommandNames = response.typedCommandNames || [];
       palette.usage = response.usage || {};
       render();
     } catch (error) {
@@ -209,7 +211,13 @@
     const { type } = parseQuery(palette.input.value);
     palette.input.placeholder = PLACEHOLDERS[type] ?? DEFAULT_PLACEHOLDER;
 
-    palette.visible = rankItems(palette.items, palette.input.value, palette.usage).slice(0, 12);
+    const commandMode = commandModeItems(
+      palette.items,
+      palette.input.value,
+      palette.typedCommandNames,
+    );
+    palette.visible =
+      commandMode ?? rankItems(palette.items, palette.input.value, palette.usage).slice(0, 12);
     palette.selected = Math.min(palette.selected, Math.max(0, palette.visible.length - 1));
     palette.resultsElement.replaceChildren();
     setStatus();
@@ -305,12 +313,26 @@
     const item = palette.visible[index];
     if (!item) return;
 
+    if (item.prefill) {
+      palette.input.value = item.prefill;
+      palette.selected = 0;
+      render();
+      palette.input.focus();
+      palette.input.setSelectionRange(item.prefill.length, item.prefill.length);
+      return;
+    }
+
     palette.busy = true;
     palette.input.disabled = true;
     setStatus(`Running ${item.label}…`);
 
     try {
-      const response = await chrome.runtime.sendMessage({ type: "execute-item", id: item.id });
+      const typedText = item.type === "typed-command" ? palette.input.value : item.typedCommand;
+      const response = await chrome.runtime.sendMessage(
+        typedText
+          ? { type: "execute-typed-command", text: typedText, id: item.id }
+          : { type: "execute-item", id: item.id },
+      );
       if (!response?.ok) throw new Error(response?.error || "Command failed.");
       if (response.effect) await applyEffect(response.effect);
       closePalette();
