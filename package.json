@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test.js && node --check service-worker.js && node --check palette-core.js && node --check content-script.js"
+    "test": "node --test test.js && node --check service-worker.js && node --check palette-core.js && node --check content-script.js && node --check filesystem.js && node --check settings.js"
   }
 }

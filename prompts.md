@@ -1,5 +1,27 @@
 # Prompts
 
+## Add filesystem access, 07 Oct 2026
+
+<!-- Extension File Access Implementation: https://chatgpt.com/c/6ac58504-82f8-83ec-bd3c-4892ff71e236 (2026-10-07T08:09:44+08:00) -->
+
+Can a Chrome/Edge browser extension like [LocalMCP2](/plugins/plugin_asdk_app_6ab0b6c561508191882e58b23665db3e) ~/code/anand-chrome-tools/ get permission to be able to read, write, append to files in a local directory? I'd like to maintain a log of actions, etc. in a local directory. What would it take to do that? I mean, does the user give permissions upfront during installation or something else? How do users specific WHICH directory to allow access for and how can they change that? What's the easiest way to implement this in ~/code/anand-chrome-tools?
+
+Treat these as sample use cases I'm solving for (though I'll likely add much more to the directory).
+
+* Whenever the user performs an action, I will log it in actions.jsonl
+* The user can annotate any website and I'll store that in notes.jsonl and it'll be visible when they open that page
+
+For anything you're unsure of, feel free to test and verify. But when using agent-browser with CDP localhost:9222 try using background operations (see devtools skill) as much as possible, to avoid disturbing my browser, and avoid changing tabs you didn't open.
+
+---
+
+OK. Implement the settings page (elegant, lightweight & minimal) and action logs. I don't need action logs to be synced on every action - just once daily is sufficient. It might be good if the extension reads from the directory on load, saves once daily or on exit (if there are any new actions to save). In that sense, a monthly (UTC) JSONL is probably fine. The extension has to maintain new actions in memory (or local storage) and save them periodically. It also needs to maintain the action usage counts - probably in memory (or local storage).
+
+Think about the simplest, most lightweight (resource-wise AND code-wise) implementation. Explore alternatives & test if you think them worthwhile, pick what emerges as the best approach, and document your rationale.
+
+Run and test - or let me know what to do and I'll test it.
+
+
 ## Add command palette, 05 Oct 2026
 
 <!-- Browser Shortcut Bookmarklet: https://chatgpt.com/c/6ac37a30-8230-83ec-b56f-562b355c0a96 (2026-10-06T06:52:11+08:00) -->

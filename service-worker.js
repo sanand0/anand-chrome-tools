@@ -1,9 +1,13 @@
 // @ts-check
 
 import "./palette-core.js";
+import { appendText, getDataDirectory, getDirectoryPermission } from "./filesystem.js";
 
 const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts } =
   globalThis.AnandPaletteCore;
+
+const LOG_SYNC_ALARM = "sync-action-logs";
+const RECENT_LOG_MS = 90 * 24 * 60 * 60 * 1000;
 
 const command = (id, label, detail, { keywords = [], repeatable = true } = {}) => ({
   id: `command:${id}`,
@@ -24,6 +28,9 @@ const COMMANDS = [
     { keywords: ["GitHub Pages repository repo"] },
   ),
   command("repeat-last", "Repeat last command", "Run the last successful palette item again", {
+    repeatable: false,
+  }),
+  command("settings", "Settings", "Choose local data folder and sync action logs", {
     repeatable: false,
   }),
   command("export-logs", "Export command logs", "Download the local command log as TSV", {
@@ -58,7 +65,18 @@ chrome.commands.onCommand.addListener(async (name, tab) => {
   }
 });
 
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== LOG_SYNC_ALARM) return;
+  void syncActionLogs().catch((error) => {
+    console.warn("Could not sync action logs.", error);
+    void ensureLogSyncAlarm();
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => void ensureLogSyncAlarm());
+
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  await ensureLogSyncAlarm();
   if (reason !== "install") return;
   const missing = (await chrome.commands.getAll()).filter(({ shortcut }) => !shortcut);
   if (missing.length) {
@@ -68,6 +86,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "palette-data") return reply(getPaletteData(), sendResponse);
+  if (message?.type === "sync-action-logs") return reply(syncActionLogs(), sendResponse);
 
   if (message?.type === "execute-item") {
     const tabId = sender.tab?.id;
@@ -215,6 +234,7 @@ async function runItem(item, tabId) {
   if (item.type === "bookmarklet") return runBookmarklet(item, tabId);
   if (item.id === "command:copy-current-page") return copyCurrentPage(tabId);
   if (item.id === "command:toggle-github") return toggleGithub(tabId);
+  if (item.id === "command:settings") return chrome.runtime.openOptionsPage();
   throw new Error(`Unknown command: ${item.label}`);
 }
 
@@ -280,8 +300,13 @@ async function recordRun(
   { status, repeated = false, error = "", saveLast = status === "success" && item.repeatable !== false },
 ) {
   const now = Date.now();
-  const { logs = [], usage = {} } = await chrome.storage.local.get(["logs", "usage"]);
-  logs.push({
+  const { logs = [], usage = {}, pendingLogs = [] } = await chrome.storage.local.get([
+    "logs",
+    "usage",
+    "pendingLogs",
+  ]);
+  const entry = {
+    eventId: crypto.randomUUID(),
     timestamp: new Date(now).toISOString(),
     type: item.type,
     name: item.label,
@@ -289,9 +314,12 @@ async function recordRun(
     status,
     repeated: Boolean(repeated),
     error,
-  });
+  };
+  const recentLogs = logs.filter(({ timestamp }) => Date.parse(timestamp) >= now - RECENT_LOG_MS);
+  recentLogs.push(entry);
+  pendingLogs.push(entry);
 
-  const update = { logs };
+  const update = { logs: recentLogs, pendingLogs };
   if (status === "success") {
     const previous = usage[item.id] || {};
     usage[item.id] = { count: (Number(previous.count) || 0) + 1, lastUsed: now };
@@ -299,6 +327,52 @@ async function recordRun(
     if (saveLast) update.lastRun = { id: item.id };
   }
   await chrome.storage.local.set(update);
+  await ensureLogSyncAlarm();
+}
+
+async function ensureLogSyncAlarm() {
+  const { pendingLogs = [] } = await chrome.storage.local.get(["pendingLogs"]);
+  if (!pendingLogs.length || (await chrome.alarms.get(LOG_SYNC_ALARM))) return;
+  await chrome.alarms.create(LOG_SYNC_ALARM, { when: nextUtcMidnight() });
+}
+
+async function syncActionLogs() {
+  const { pendingLogs = [] } = await chrome.storage.local.get(["pendingLogs"]);
+  if (!pendingLogs.length) {
+    await chrome.alarms.clear(LOG_SYNC_ALARM);
+    return { synced: 0 };
+  }
+
+  const directory = await getDataDirectory();
+  if (!directory) return { synced: 0, reason: "no-directory" };
+  if ((await getDirectoryPermission(directory)) !== "granted") {
+    return { synced: 0, reason: "permission-required" };
+  }
+
+  const byMonth = Map.groupBy(pendingLogs, ({ timestamp }) => timestamp.slice(0, 7));
+  let synced = 0;
+
+  for (const [month, entries] of byMonth) {
+    const text = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+    await appendText(directory, `actions-${month}.jsonl`, text);
+    synced += entries.length;
+
+    // Re-read before acknowledging so actions recorded during the file write are never dropped.
+    const written = new Set(entries.map(({ eventId }) => eventId));
+    const { pendingLogs: current = [] } = await chrome.storage.local.get(["pendingLogs"]);
+    await chrome.storage.local.set({
+      pendingLogs: current.filter(({ eventId }) => !written.has(eventId)),
+      lastLogSyncAt: new Date().toISOString(),
+    });
+  }
+
+  await ensureLogSyncAlarm();
+  return { synced };
+}
+
+function nextUtcMidnight(now = Date.now()) {
+  const date = new Date(now);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
 }
 
 function safeHost(rawUrl) {

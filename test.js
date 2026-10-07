@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
+import { appendText } from "./filesystem.js";
 await import("./palette-core.js");
 const { bookmarkletCode, findBookmarklets, githubTarget, recentUsageCounts, rankItems } =
   globalThis.AnandPaletteCore;
@@ -14,10 +15,11 @@ test("manifest wires the command palette with only required capabilities", () =>
   assert.equal(manifest.background?.type, "module");
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["bookmarks", "scripting", "storage", "tabGroups", "tabs", "userScripts"].sort(),
+    ["alarms", "bookmarks", "scripting", "storage", "tabGroups", "tabs", "userScripts"].sort(),
   );
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
   assert.equal(manifest.content_scripts, undefined);
+  assert.deepEqual(manifest.options_ui, { page: "settings.html", open_in_tab: true });
   assert.ok(manifest.commands?.["open-command-palette"]);
   assert.deepEqual(manifest.commands["open-command-palette"].suggested_key, {
     default: "Ctrl+Shift+Space",
@@ -28,7 +30,14 @@ test("manifest wires the command palette with only required capabilities", () =>
 });
 
 test("manifest and on-demand injection reference existing local files", () => {
-  const files = ["service-worker.js", "palette-core.js", "content-script.js"];
+  const files = [
+    "service-worker.js",
+    "palette-core.js",
+    "content-script.js",
+    "filesystem.js",
+    "settings.html",
+    "settings.js",
+  ];
   for (const file of files) assert.ok(existsSync(new URL(file, import.meta.url)), file);
 
   const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
@@ -36,6 +45,64 @@ test("manifest and on-demand injection reference existing local files", () => {
   assert.match(worker, /files: \["palette-core\.js", "content-script\.js"\]/);
   assert.match(worker, /name === "new-tab-right"/);
   assert.match(worker, /index: current\.index \+ 1/);
+});
+
+test("action log append preserves existing bytes and closes the file", async () => {
+  const calls = [];
+  const writable = {
+    async seek(position) {
+      calls.push(["seek", position]);
+    },
+    async write(text) {
+      calls.push(["write", text]);
+    },
+    async close() {
+      calls.push(["close"]);
+    },
+    async abort() {
+      calls.push(["abort"]);
+    },
+  };
+  const directory = {
+    async getFileHandle(name, options) {
+      assert.equal(name, "actions-2026-10.jsonl");
+      assert.deepEqual(options, { create: true });
+      return {
+        async getFile() {
+          return { size: 123 };
+        },
+        async createWritable(options) {
+          assert.deepEqual(options, { keepExistingData: true });
+          return writable;
+        },
+      };
+    },
+  };
+
+  await appendText(directory, "actions-2026-10.jsonl", "{\"ok\":true}\n");
+  assert.deepEqual(calls, [
+    ["seek", 123],
+    ["write", "{\"ok\":true}\n"],
+    ["close"],
+  ]);
+});
+
+test("worker keeps a durable pending queue and schedules one-shot UTC log sync", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /pendingLogs/);
+  assert.match(worker, /chrome\.alarms\.create\(LOG_SYNC_ALARM, \{ when: nextUtcMidnight\(\) \}\)/);
+  assert.match(worker, /actions-\$\{month\}\.jsonl/);
+  assert.match(worker, /current\.filter\(\(\{ eventId \}\) => !written\.has\(eventId\)\)/);
+});
+
+test("settings page selects a read-write directory and can force a sync", () => {
+  const html = readFileSync(new URL("./settings.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+  assert.match(html, /id="choose"/);
+  assert.match(html, /id="sync"/);
+  assert.match(script, /showDirectoryPicker/);
+  assert.match(script, /mode: "readwrite"/);
+  assert.match(script, /type: "sync-action-logs"/);
 });
 
 test("palette is injected on demand and replaces any previous instance", () => {
