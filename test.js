@@ -9,9 +9,11 @@ const {
   commandModeItems,
   findBookmarklets,
   githubTarget,
+  migrateBookmarkletUsage,
   parseCommandInput,
   recentUsageCounts,
   rankItems,
+  usageKey,
 } = globalThis.AnandPaletteCore;
 const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
 
@@ -263,6 +265,59 @@ test("recent usage counts successful executions in the trailing quarter", () => 
   ];
 
   assert.deepEqual(recentUsageCounts(logs, now), { "command:a": 2, "command:b": 1 });
+});
+
+test("bookmarklet counts follow titles, including deleted and recreated bookmarks", () => {
+  const now = Date.parse("2026-10-08T00:00:00Z");
+  const logs = [
+    { type: "bookmarklet", id: "bookmarklet:old", name: "ChatGPT scraper", status: "success", timestamp: new Date(now - 20_000).toISOString() },
+    { type: "bookmarklet", id: "bookmarklet:new", name: "ChatGPT scraper", status: "success", timestamp: new Date(now - 10_000).toISOString() },
+    { type: "bookmarklet", id: "bookmarklet:new", name: "ChatGPT scraper", status: "error", timestamp: new Date(now - 5000).toISOString() },
+    { type: "bookmarklet", id: "bookmarklet:other", name: "Other", status: "success", timestamp: new Date(now - 1000).toISOString() },
+    { type: "command", id: "command:test", name: "ChatGPT scraper", status: "success", timestamp: new Date(now - 1000).toISOString() },
+  ];
+  assert.deepEqual(recentUsageCounts(logs, now), {
+    "bookmarklet-title:ChatGPT scraper": 2,
+    "bookmarklet-title:Other": 1,
+    "command:test": 1,
+  });
+  assert.equal(usageKey({ type: "bookmarklet", id: "bookmarklet:latest", label: "ChatGPT scraper" }), "bookmarklet-title:ChatGPT scraper");
+  assert.equal(usageKey({ type: "command", id: "command:test", label: "ChatGPT scraper" }), "command:test");
+});
+
+test("worker uses title-based usage while retaining bookmark IDs for execution and repeat", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const migratedUsage = migrateBookmarkletUsage\(usage, logs\)/);
+  assert.match(worker, /recentUses: recentUses\[usageKey\(item\)\] \|\| 0/);
+  assert.match(worker, /const key = usageKey\(item\)/);
+  assert.match(worker, /id: `bookmarklet:\$\{node\.id\}`/);
+  assert.match(worker, /chrome\.bookmarks\.get\(id\.slice\("bookmarklet:"\.length\)\)/);
+  assert.match(worker, /if \(saveLast\) update\.lastRun = \{ id: item\.id \}/);
+});
+
+test("legacy bookmarklet frecency merges both IDs once under their shared title", () => {
+  const now = Date.parse("2026-10-08T00:00:00Z");
+  const usage = {
+    "bookmarklet:old": { count: 7, lastUsed: now - 10_000 },
+    "bookmarklet:new": { count: 3, lastUsed: now - 1000 },
+    "bookmarklet-title:ChatGPT scraper": { count: 2, lastUsed: now },
+    "command:test": { count: 8, lastUsed: now },
+  };
+  const logs = [
+    { type: "bookmarklet", id: "bookmarklet:old", name: "ChatGPT scraper" },
+    { type: "bookmarklet", id: "bookmarklet:old", name: "ChatGPT scraper" },
+    { type: "bookmarklet", id: "bookmarklet:new", name: "ChatGPT scraper" },
+  ];
+  const migrated = migrateBookmarkletUsage(usage, logs);
+  assert.deepEqual(migrated, {
+    "bookmarklet-title:ChatGPT scraper": { count: 12, lastUsed: now },
+    "command:test": { count: 8, lastUsed: now },
+  });
+  assert.equal(migrateBookmarkletUsage(migrated, logs), migrated);
+  assert.ok(usage["bookmarklet:old"]); // Original storage value stays unchanged.
+  assert.equal(rankItems([
+    { id: "bookmarklet:replacement", type: "bookmarklet", label: "ChatGPT scraper" },
+  ], "", migrated, now)[0].frecency > 0, true);
 });
 
 test("exact matches beat fuzzy and frecent matches", () => {

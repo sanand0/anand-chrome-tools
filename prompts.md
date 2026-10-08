@@ -1,5 +1,24 @@
 # Prompts
 
+## Anand Chrome Tools - Use Bookmarklet Title as Key, 08 Oct 2026
+
+<!-- Anand Chrome Tools - Use Bookmarklet Title as Key: https://chatgpt.com/c/6ac73f5f-23e0-83ec-a314-a3f68954e4d5 (2026-10-08T15:14:30+08:00) -->
+
+On @LocalMCP2 the plugin at ~/code/anand-chrome-tools/ maps bookmarklets based on their URLs, I think. (Is that right?)
+
+But I might change the bookmarklet. For example, I just changed the ChatGPT scraper bookmarklet. The count fell to zero - though I've used it before. I used the new bookmarklet a few times.
+
+I would prefer using the title of bookmarklets rather than the URL. (This is just for bookmarklets.)
+
+Review the repo. What's the minimal change that'll achieve this? Use relevant skills.
+
+---
+
+Based on this, I would expect to see the old and new ChatGPT scraper bookmarklets both count towards the same usage count. Is that right?
+If yes, proceed with the change.
+If not, let me know what additional changes are required.
+
+
 ## Log to filesystem and add titles, 07 Oct 2026
 
 <!-- 🔸commit Anand Chrome Tools - File system and Tab Titles: https://chatgpt.com/c/6ac58504-82f8-83ec-bd3c-4892ff71e236 (2026-10-07T10:26:16+08:00) -->

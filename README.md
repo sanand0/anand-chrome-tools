@@ -23,7 +23,7 @@ Start typing to search everything, or narrow the search with:
 
 Search is fuzzy and keyboard-oriented. For example, `one punch` matches `One-punch man`, `ideas pi` matches `Pi Durable Ideas`, and abbreviations such as `ocp` can match `Open Command Palette`. Frequently and recently used matches rank higher; `4 / Q` means four successful uses in the trailing 90 days.
 
-Bookmarklets are discovered recursively from any folder named **Bookmarklets** below the bookmarks bar.
+Bookmarklets are discovered recursively from any folder named **Bookmarklets** below the bookmarks bar. Usage counts and frecency are grouped by **exact bookmarklet title**, so editing a bookmarklet or deleting/recreating it under the same title preserves its displayed 90-day count. Bookmarklets sharing a title share statistics; renaming one starts a separate title-based history.
 
 ## Commands
 
@@ -46,7 +46,7 @@ The selected folder currently contains two kinds of data:
 - `titles.jsonl` — an append-only history of Title changes. Each line records the UTC timestamp, exact URL, and prefix; a `null` prefix means the saved title was cleared. Title changes are written immediately.
 - `actions-YYYY-MM.jsonl` — command/activity logs grouped by UTC month. Actions are first stored safely in `chrome.storage.local` and flushed to disk once daily, or immediately with **Settings → Sync now**. Every logged palette action records the invoking page's exact `url` and `title`; commands may add further action-specific fields at the top level.
 
-The current URL→title-prefix map and usage/frecency data live in `chrome.storage.local`, so normal browsing does not require rereading JSONL files. When you choose or change the data folder, `titles.jsonl` is replayed once to rebuild the title-prefix map.
+The current URL→title-prefix map and usage/frecency data live in `chrome.storage.local`, so normal browsing does not require rereading JSONL files. When you choose or change the data folder, `titles.jsonl` is replayed once to rebuild the title-prefix map. On first opening the palette after this update, older bookmark-ID usage statistics are combined by title wherever the retained 90-day action logs identify those IDs, including IDs of deleted bookmarks.
 
 If the data folder is unavailable, Title commands fail visibly rather than pretending the change was saved. Pending action logs remain queued in browser storage until they can be written.
 

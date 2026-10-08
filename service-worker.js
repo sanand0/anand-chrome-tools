@@ -9,8 +9,10 @@ import {
   replayTitleEvents,
 } from "./filesystem.js";
 
-const { bookmarkletCode, findBookmarklets, githubTarget, parseCommandInput, recentUsageCounts } =
-  globalThis.AnandPaletteCore;
+const {
+  bookmarkletCode, findBookmarklets, githubTarget, migrateBookmarkletUsage,
+  parseCommandInput, recentUsageCounts, usageKey,
+} = globalThis.AnandPaletteCore;
 
 const LOG_SYNC_ALARM = "sync-action-logs";
 const RECENT_LOG_MS = 90 * 24 * 60 * 60 * 1000;
@@ -161,6 +163,9 @@ async function getPaletteData() {
     chrome.storage.local.get(["usage", "logs"]),
   ]);
 
+  const migratedUsage = migrateBookmarkletUsage(usage, logs);
+  if (migratedUsage !== usage) await chrome.storage.local.set({ usage: migratedUsage });
+
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const tabItems = tabs.map((tab) => {
     const groupTitle = groupById.get(tab.groupId)?.title?.trim() || "";
@@ -188,9 +193,9 @@ async function getPaletteData() {
   const recentUses = recentUsageCounts(logs);
   const items = [...COMMANDS, ...bookmarkItems, ...tabItems].map((item) => ({
     ...item,
-    recentUses: recentUses[item.id] || 0,
+    recentUses: recentUses[usageKey(item)] || 0,
   }));
-  return { items, typedCommandNames: Object.keys(TYPED_COMMANDS), usage };
+  return { items, typedCommandNames: Object.keys(TYPED_COMMANDS), usage: migratedUsage };
 }
 
 async function executeItem(id, tabId, { repeated = false, preserveLast = false } = {}) {
@@ -529,8 +534,9 @@ async function recordRun(
 
   const update = { logs: recentLogs, pendingLogs };
   if (status === "success") {
-    const previous = usage[item.id] || {};
-    usage[item.id] = { count: (Number(previous.count) || 0) + 1, lastUsed: now };
+    const key = usageKey(item);
+    const previous = usage[key] || {};
+    usage[key] = { count: (Number(previous.count) || 0) + 1, lastUsed: now };
     update.usage = usage;
     if (saveLast) update.lastRun = { id: item.id };
   }

@@ -116,16 +116,44 @@
     return 50 * Math.log2(count + 1) + 300 * Math.exp(-ageDays / 7);
   }
 
+  // Bookmarklet usage is identified by title; execution still uses the browser bookmark ID.
+  const usageKey = ({ type, id, label, name }) =>
+    type === "bookmarklet" ? `bookmarklet-title:${name ?? label}` : id;
+
   function recentUsageCounts(logs, now = Date.now()) {
     const cutoff = now - 90 * 86_400_000;
     const counts = {};
-    for (const { id, status, timestamp } of logs) {
+    for (const entry of logs) {
+      const { status, timestamp } = entry;
+      const key = usageKey(entry);
       const time = Date.parse(timestamp);
-      if (status === "success" && id && time >= cutoff && time <= now) {
-        counts[id] = (counts[id] || 0) + 1;
+      if (status === "success" && key && time >= cutoff && time <= now) {
+        counts[key] = (counts[key] || 0) + 1;
       }
     }
     return counts;
+  }
+
+  function migrateBookmarkletUsage(usage, logs) {
+    // Recover titles for old bookmark IDs (including deleted ones) from retained action logs.
+    const titles = new Map(
+      logs
+        .filter(({ type, id, name }) => type === "bookmarklet" && id && name)
+        .map(({ id, name }) => [id, name]),
+    );
+    let result = usage;
+    for (const [id, name] of titles) {
+      if (!result[id]) continue;
+      if (result === usage) result = { ...usage };
+      const key = usageKey({ type: "bookmarklet", name });
+      const previous = result[key] || {};
+      result[key] = {
+        count: (Number(previous.count) || 0) + (Number(result[id].count) || 0),
+        lastUsed: Math.max(Number(previous.lastUsed) || 0, Number(result[id].lastUsed) || 0),
+      };
+      delete result[id];
+    }
+    return result;
   }
 
   function parseQuery(rawQuery) {
@@ -178,7 +206,7 @@
     return items
       .filter((item) => !type || item.type === type)
       .map((item) => {
-        const frecency = frecencyScore(usage[item.id], now);
+        const frecency = frecencyScore(usage[usageKey(item)], now);
         if (!query) return { ...item, frecency, tier: 0, score: 0 };
         const match = queryScore(query, item.texts?.length ? item.texts : [item.label]);
         return match ? { ...item, frecency, ...match } : null;
@@ -249,9 +277,11 @@
     commandModeItems,
     findBookmarklets,
     githubTarget,
+    migrateBookmarkletUsage,
     recentUsageCounts,
     parseCommandInput,
     parseQuery,
     rankItems,
+    usageKey,
   };
 })();
