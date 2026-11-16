@@ -272,8 +272,62 @@
     return { url: `https://github.com/${owner}/${repo || `${owner}.github.io`}`, verify: false };
   }
 
+  // Annotation text: one array of segments per line. Supports **bold**, _italic_ / *italic*,
+  // #hashtags (tag) and @tags (mention). Emails, URL fragments, and identifiers stay plain.
+  const NOTE_STYLE =
+    /\*\*(.+?)\*\*|(?<![\p{L}\p{N}_])_(?!\s)(.+?)(?<!\s)_(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}*])\*(?![\s*])(.+?)(?<!\s)\*(?![\p{L}\p{N}*])/gu;
+  const HASHTAG =
+    /(?<![\p{L}\p{N}_&/#@.])(?:#[\p{L}\p{N}_][\p{L}\p{N}_-]*|@[\p{L}\p{N}_](?:[\p{L}\p{N}_.-]*[\p{L}\p{N}_])?)/gu;
+
+  function noteLines(text) {
+    return String(text ?? "")
+      .split(/\r?\n/)
+      .map((line) => {
+        const segments = [];
+        const push = (value, style) => {
+          let last = 0;
+          for (const match of value.matchAll(HASHTAG)) {
+            if (match.index > last) segments.push({ ...style, text: value.slice(last, match.index) });
+            segments.push({ ...style, text: match[0], [match[0][0] === "#" ? "tag" : "mention"]: true });
+            last = match.index + match[0].length;
+          }
+          if (last < value.length) segments.push({ ...style, text: value.slice(last) });
+        };
+        let last = 0;
+        for (const match of line.matchAll(NOTE_STYLE)) {
+          push(line.slice(last, match.index), {});
+          if (match[1] !== undefined) push(match[1], { bold: true });
+          else push(match[2] ?? match[3], { italic: true });
+          last = match.index + match[0].length;
+        }
+        push(line.slice(last), {});
+        return segments;
+      });
+  }
+
+  // Google Calendar eids are base64("<eventId>[_<instance>] <calendarId>"). The instance suffix is kept,
+  // so each occurrence of a recurring event has its own annotation.
+  function calendarItemId(eid) {
+    const raw = String(eid ?? "");
+    let decoded = "";
+    try {
+      decoded = atob(raw.replaceAll("-", "+").replaceAll("_", "/"));
+    } catch {
+      return raw ? `gcal:${raw}` : null;
+    }
+    const [eventId, calendarId] = decoded.split(" ");
+    if (!eventId || !calendarId) return raw ? `gcal:${raw}` : null;
+    return `gcal:${calendarId}/${eventId}`;
+  }
+
+  // The account email is the last email-like token, e.g. in "Subject - me@example.com - Gmail".
+  const lastEmail = (text) => String(text ?? "").match(/[^\s@()<>"]+@[^\s@()<>"]+\.[^\s@()<>"]+/g)?.at(-1) ?? null;
+
   globalThis.AnandPaletteCore = {
     bookmarkletCode,
+    calendarItemId,
+    lastEmail,
+    noteLines,
     commandModeItems,
     findBookmarklets,
     githubTarget,

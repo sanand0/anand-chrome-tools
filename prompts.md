@@ -1,5 +1,53 @@
 # Prompts
 
+## Annotate websites with actions, 16 Nov 2026
+
+<!--
+cd ~/code/anand-chrome-tools
+claude --model opus --effort medium
+-->
+
+I'd like to update this extension so that I can annotate sites where I perform work. The sites are:
+
+- mail.google.com: I'll annotate emails in my inbox (or, perhaps any view) with what I need to do next.
+- chatgpt.com: I'll annotate caht lists (e.g. in recents or under projects on the left sidebar, maybe search, etc.) with what I need to do next.
+- calendar.google.com: I'll annotate calendar entries with what I need to prepare for the meeting.
+- claude.com: Same as chatgpt.com
+
+The annotations tell me what I need to do next, so they should be prominently visible against the item.
+They're typically short, like "Schedule this on calendar" or "Download and recreate using an agent", but (e.g. for Calendar events) a few might be MUCH longer and multi-line. I would like #hashtags to be highlighted and, perhaps, limited Markdown (**bold** and _italics_) support.
+I have multiple accounts on Google, ChatGPT, Claude, etc. so make sure you pick an ID for the items that'll be unique across accounts.
+I'd like the annotations to be stored on the local file system at ~/Documents/data/anand-chrome-tools/actions.jsonl - or any other file format, keeping in mind that this might grow. Assuming I annotate 30 items a day x 365 / year, would the JSONL be OK for a few years or do I need a different format?
+I might extend this to a few more sites in the future, so keep the design extensible and simple.
+The sites might change their UI. So make sure the implementation is simple and robust. In the worst case, you might just append / prepend to a specific element's HTML (e.g. subject, thread title, etc.)
+
+Each site will need a different UI approach. For example, I'd prefer these be always visible. My preference is below, but I'm OK for you to change based on your design preference as well as what's simple and robust:
+
+- mail.google.com: add it before the subject.
+- chatgpt.com: add it below the thread title.
+- calendar.google.com: add an indicator in the event chip, and show full annotation when the event is clicked.
+- claude.com: add it below the thread title.
+
+Test out variations, evaluating pros and cons, before finalizing.
+
+--- <!-- steering -->
+
+I prefer calendar annotations to appear on all recurrances.
+
+--- <!-- steering -->
+
+The black-on-yellow design on ChatGPT is too loud and doesn't feel aligned with the item, e.g. I don't know if it's associated with the one above or below.
+But the yellow outline on the calendar feels about right.
+
+---
+
+Treat clicking outside the dialog as a save, not cancel.
+Highlight @tags - slightly differently from #hashtags.
+On ChatGPT and Claude, the annotation overlaps with the rounded box that highlights the currently selected item and doesn't look good.
+I take back what I said about calendar annotations. Annotations should be item specific, i.e. different annotations for each instance of a recurring event.
+
+<!-- claude --model opus --effort medium --resume d481c9e2-e500-46e7-8bba-77a1ac03134a -->
+
 ## Anand Chrome Tools - Use Bookmarklet Title as Key, 08 Oct 2026
 
 <!-- Anand Chrome Tools - Use Bookmarklet Title as Key: https://chatgpt.com/c/6ac73f5f-23e0-83ec-a314-a3f68954e4d5 (2026-10-08T15:14:30+08:00) -->
@@ -17,7 +65,6 @@ Review the repo. What's the minimal change that'll achieve this? Use relevant sk
 Based on this, I would expect to see the old and new ChatGPT scraper bookmarklets both count towards the same usage count. Is that right?
 If yes, proceed with the change.
 If not, let me know what additional changes are required.
-
 
 ## Log to filesystem and add titles, 07 Oct 2026
 

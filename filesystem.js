@@ -48,23 +48,26 @@ export async function readText(directory, filename) {
   }
 }
 
-export function replayTitleEvents(text) {
-  const prefixes = {};
+// Replays an append-only JSONL event log into the latest value per key; a null value deletes the key.
+export function replayLatest(text, keyField, valueField) {
+  const latest = {};
   for (const line of String(text ?? "").split(/\r?\n/).filter(Boolean)) {
     try {
-      applyTitleEvent(prefixes, JSON.parse(line));
+      const event = JSON.parse(line);
+      const key = event?.[keyField];
+      const value = event?.[valueField];
+      if (!key) continue;
+      if (value === null) delete latest[key];
+      else if (typeof value === "string" && value) latest[key] = value;
     } catch {
-      // A manually edited/corrupt line should not hide otherwise valid title preferences.
+      // A manually edited/corrupt line should not hide otherwise valid entries.
     }
   }
-  return prefixes;
+  return latest;
 }
 
-function applyTitleEvent(prefixes, event) {
-  if (!event?.url) return;
-  if (event.prefix === null) delete prefixes[event.url];
-  else if (typeof event.prefix === "string" && event.prefix) prefixes[event.url] = event.prefix;
-}
+export const replayTitleEvents = (text) => replayLatest(text, "url", "prefix");
+export const replayAnnotationEvents = (text) => replayLatest(text, "id", "text");
 
 function idbRequest(mode, operation) {
   return new Promise((resolve, reject) => {

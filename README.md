@@ -1,6 +1,6 @@
 # Anand Chrome Tools
 
-A small, dependency-free Edge/Chrome extension for keyboard-first browser actions. Its main interface is a VS Code-style command palette for switching tabs, running bookmarklets, and executing commands.
+A small, dependency-free Edge/Chrome extension for keyboard-first browser actions. Its main interface is a VS Code-style command palette for switching tabs, running bookmarklets, and executing commands. It also pins always-visible next-action notes onto emails, calendar events, and ChatGPT/Claude chats.
 
 ## Install
 
@@ -13,7 +13,7 @@ For features that save files locally, open the palette, choose **Settings**, the
 
 ## Use
 
-Press **Ctrl+Shift+Space** to open the command palette. Press **Ctrl+Shift+.** to open a new tab immediately to the right of the current tab.
+Press **Ctrl+Shift+Space** to open the command palette. Press **Ctrl+Shift+.** to open a new tab immediately to the right of the current tab. Press **Alt+Shift+M** to annotate the item under the mouse (see [Annotations](#annotations)).
 
 Start typing to search everything, or narrow the search with:
 
@@ -25,8 +25,36 @@ Search is fuzzy and keyboard-oriented. For example, `one punch` matches `One-pun
 
 Bookmarklets are discovered recursively from any folder named **Bookmarklets** below the bookmarks bar. Usage counts and frecency are grouped by **exact bookmarklet title**, so editing a bookmarklet or deleting/recreating it under the same title preserves its displayed 90-day count. Bookmarklets sharing a title share statistics; renaming one starts a separate title-based history.
 
+## Annotations
+
+Annotate work items with what you need to do next. Notes stay visible next to the item wherever it appears:
+
+| Site | Where the note appears |
+| --- | --- |
+| Gmail (`mail.google.com`) | A yellow-outlined pill before the subject in the inbox and every other thread list; the full note above the subject of an open thread. |
+| Google Calendar (`calendar.google.com`) | A 📝 marker and yellow outline on the event chip; the full note below the title and time in the event popup. Each occurrence of a recurring event has its own note. |
+| ChatGPT (`chatgpt.com`) | A line under the chat title in the sidebar (recents, projects) and on project pages. |
+| Claude (`claude.ai`) | A line under the chat title in the sidebar, Recents, and project pages. |
+
+To add, edit, or delete a note:
+
+1. Hover over an item (an inbox row, calendar event, or sidebar chat), or move to it with the keyboard, then press **Alt+Shift+M**. If nothing is hovered or focused, this annotates the open thread, chat, or event popup. **Annotate** in the command palette does the same.
+2. Type the note. **Enter** or clicking outside the editor saves, **Shift+Enter** adds a line, **Esc** cancels. Saving an empty note deletes it.
+3. Click any visible note to edit it. Clicking a note does not open the email or chat.
+
+Notes support `**bold**`, `_italic_` or `*italic*`, highlighted `#hashtags` (amber), and `@tags` (blue). Email addresses are not treated as `@tags`. Short views show the first line (or first three lines in sidebars); hover for the full text. Long multi-line notes are shown in full in Gmail's open thread and Calendar's event popup.
+
+Notes are tied to stable item IDs, not titles or positions, so they survive renames and reordering and never cross accounts:
+
+- Gmail: your account email + thread ID, e.g. `gmail:me@gmail.com:thread-f:1881…`.
+- Calendar: calendar ID + event ID, including the occurrence for recurring events, e.g. `gcal:me@m/7vonjo8c…_20261117`. The same event in two of your calendars gets separate notes.
+- ChatGPT / Claude: the chat's globally unique UUID, e.g. `chatgpt:6afa89e2-…`.
+
+Annotations require the local data folder (see [Local data](#local-data)); if it's not connected, the editor shows an error instead of silently losing the note. If a site redesign hides notes, your notes stay safe in the file; the extension needs a selector update in `annotations.js`.
+
 ## Commands
 
+- **Annotate** — add or edit a note on the hovered/focused item, or on the open thread/chat/event. Same as **Alt+Shift+M**.
 - **Title** — select it, type a prefix, and press Enter. Selecting it is exactly like typing `Title: ` into the palette yourself. The prefix is applied immediately and automatically restored whenever you revisit that exact URL. Tabs with a saved prefix are visually marked with `🔸` at the start of the displayed title.
 - **Title clear** — remove the saved prefix for the current page. You can also type `Title clear` directly.
 - **Copy current page** — copy the current page as `[title](URL)`.
@@ -41,14 +69,15 @@ Title preferences are matched against the exact page URL, including its query st
 
 ## Local data
 
-The selected folder currently contains two kinds of data:
+The selected folder (e.g. `~/Documents/data/anand-chrome-tools/`) contains three kinds of data:
 
+- `annotations.jsonl` — an append-only history of annotations, written immediately. Each line records `eventId`, UTC `timestamp`, `site`, item `id`, `text` (`null` = deleted), the item's `label` (subject/title), a `url` to open it (Gmail URLs include the account), and `account` where known. The latest line per `id` is the current note, so the file doubles as a to-do list that scripts or agents can read: `jaq -s 'group_by(.id) | map(last | select(.text))' annotations.jsonl`. At about 30 annotations/day events average ~300 bytes, so the file grows ~3–5 MB/year including edits. JSONL is fine for decades at that rate.
 - `titles.jsonl` — an append-only history of Title changes. Each line records the UTC timestamp, exact URL, and prefix; a `null` prefix means the saved title was cleared. Title changes are written immediately.
 - `actions-YYYY-MM.jsonl` — command/activity logs grouped by UTC month. Actions are first stored safely in `chrome.storage.local` and flushed to disk once daily, or immediately with **Settings → Sync now**. Every logged palette action records the invoking page's exact `url` and `title`; commands may add further action-specific fields at the top level.
 
-The current URL→title-prefix map and usage/frecency data live in `chrome.storage.local`, so normal browsing does not require rereading JSONL files. When you choose or change the data folder, `titles.jsonl` is replayed once to rebuild the title-prefix map. On first opening the palette after this update, older bookmark-ID usage statistics are combined by title wherever the retained 90-day action logs identify those IDs, including IDs of deleted bookmarks.
+The current notes, URL→title-prefix map, and usage/frecency data live in `chrome.storage.local`, so normal browsing does not require rereading JSONL files. When you choose or change the data folder, `titles.jsonl` and `annotations.jsonl` are replayed once to rebuild them. Manually edited JSONL files take effect after choosing the folder again. On first opening the palette after this update, older bookmark-ID usage statistics are combined by title wherever the retained 90-day action logs identify those IDs, including IDs of deleted bookmarks.
 
-If the data folder is unavailable, Title commands fail visibly rather than pretending the change was saved. Pending action logs remain queued in browser storage until they can be written.
+If the data folder is unavailable, Title commands and annotation saves fail visibly rather than pretending the change was saved. Pending action logs remain queued in browser storage until they can be written.
 
 The palette works on ordinary `http://` and `https://` pages. Browser-internal or protected pages such as `edge://extensions` do not allow extension script injection. If a shortcut is missing because of a conflict, set it at `edge://extensions/shortcuts`.
 
@@ -56,13 +85,22 @@ The palette works on ordinary `http://` and `https://` pages. Browser-internal o
 
 The extension is dependency-free Manifest V3 with no build step.
 
-- `manifest.json` declares permissions and browser shortcuts; there is no persistent content script.
+- `manifest.json` declares permissions and browser shortcuts. The only persistent content script is `annotations.js`, and it loads only on the annotated sites.
+- `annotations.js` renders and edits notes. Each site is a short data-driven list of item specs: a selector, an ID function, and where/how to place the note. To support another site, add an entry to `SITES`.
 - `service-worker.js` injects the palette on demand and owns browser APIs: discovering items, executing actions, switching tabs, logging, and export.
 - `palette-core.js` contains pure logic shared by the browser and tests: search/ranking, bookmark discovery/decoding, and GitHub URL mapping.
 - `content-script.js` is an idempotent injected palette UI and applies clipboard/download effects returned by the worker.
 - `settings.html` / `settings.js` provide the minimal local-data UI; the browser's directory picker is the permission boundary.
 - `filesystem.js` stores the selected directory handle in IndexedDB and contains the small append helper shared by settings and the service worker.
 - `test.js` covers manifest wiring and pure behavior.
+
+Annotation design notes:
+
+- **Robust anchors.** Selectors use stable IDs, hrefs, and ARIA (`[data-thread-id]`, `h2[data-thread-perm-id]`, `[data-eventid]`, `[role="dialog"]`, `a[href*="/c/"]`, `a[href*="/chat/"]`), never generated class names. Placement is computed generically, not hard-coded per DOM shape. "Below a chat title" inserts after the highest ancestor that contains only that link, because ChatGPT/Claude rows have fixed heights. The Calendar popup note goes in the child of the nearest scrolling container, because the title block has a clipped fixed height. The indent matches the title text. Elements without rendered boxes are skipped, which avoids hidden screen-reader duplicates in Gmail rows and chats in collapsed projects.
+- **Low overhead.** A debounced (120 ms) `MutationObserver` rescans; each scan fetches only the `annotation:<id>` storage keys of visible items that aren't cached yet, so cost doesn't grow with the total number of notes. `chrome.storage.onChanged` updates all tabs live. Notes re-attach when sites re-render or reorder lists, and are removed when their item disappears.
+- **Isolation.** Notes are `<anand-note>` elements with shadow DOM and constructable stylesheets, which also works under Calendar's Trusted Types. Text is built with DOM APIs only. The editor's textarea is in the light DOM so host-page keyboard handlers treat it as a text field. Note colors follow the surrounding text color, not the OS theme; for example, Gmail's message pane is white even in dark mode.
+- **Reloads.** On install/update the worker injects the content script into already-open matching tabs. A new copy signals the old one to remove its notes and listeners.
+- Chromium reserves `Alt+Shift+N` and `Alt+Shift+A` for extension shortcuts, hence `Alt+Shift+M`. Edge uses `Ctrl+Shift+,` for vertical tabs.
 
 The fuzzy matcher uses fzf-style space-separated AND terms with a compact fzy-style subsequence score. It rewards word starts and consecutive characters, mildly penalizes gaps, and uses frecency only after textual relevance.
 
@@ -77,8 +115,9 @@ Permissions are intentionally limited to the implemented features:
 - `alarms` — one-shot daily flush of pending action logs.
 - `bookmarks` — discover bookmarklets.
 - `tabs` and `tabGroups` — search and switch open tabs.
-- `storage` — pending action queue, recent logs, usage/frecency, and last-command state.
-- `scripting` plus `http://*/*` / `https://*/*` host access — inject the palette into the active page on demand.
+- `storage` — current notes, pending action queue, recent logs, usage/frecency, and last-command state.
+- `unlimitedStorage` — notes accumulate (roughly 3 MB/year at 30/day if never cleared). Without it, `chrome.storage.local`'s 10 MB quota would eventually make saves fail.
+- `scripting` plus `http://*/*` / `https://*/*` host access — inject the palette into the active page on demand, run the annotation content script on Gmail, Calendar, ChatGPT, and Claude, and re-inject it into open tabs after an update.
 - `userScripts` — execute bookmarklet code in the page's main world.
 
 Keep the repo flat and dependency-free unless a feature clearly justifies another boundary.

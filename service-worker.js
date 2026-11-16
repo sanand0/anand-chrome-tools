@@ -6,6 +6,7 @@ import {
   getDataDirectory,
   getDirectoryPermission,
   readText,
+  replayAnnotationEvents,
   replayTitleEvents,
 } from "./filesystem.js";
 
@@ -17,6 +18,8 @@ const {
 const LOG_SYNC_ALARM = "sync-action-logs";
 const RECENT_LOG_MS = 90 * 24 * 60 * 60 * 1000;
 const TITLE_MARKER = "🔸";
+const ANNOTATION_PREFIX = "annotation:";
+const ANNOTATION_SITES = ["gmail", "gcal", "chatgpt", "claude"];
 
 const command = (
   id,
@@ -54,6 +57,10 @@ const COMMANDS = [
     typedCommand: "Title clear",
     repeatable: false,
   }),
+  command("annotate", "Annotate", "Add or edit a next-action note on the hovered or open item", {
+    keywords: ["Note todo next action"],
+    repeatable: false,
+  }),
   command("repeat-last", "Repeat last command", "Run the last successful repeatable palette item again", {
     repeatable: false,
   }),
@@ -71,10 +78,16 @@ const TYPED_COMMANDS = {
 };
 
 chrome.commands.onCommand.addListener(async (name, tab) => {
-  if (!["open-command-palette", "new-tab-right"].includes(name)) return;
+  if (!["open-command-palette", "new-tab-right", "annotate"].includes(name)) return;
   const current =
     tab?.id ? tab : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
   if (!current?.id) return;
+
+  if (name === "annotate") {
+    // Only annotation sites have a receiver; elsewhere the shortcut does nothing.
+    await chrome.tabs.sendMessage(current.id, { type: "open-annotation-editor" }).catch(() => {});
+    return;
+  }
 
   if (name === "new-tab-right") {
     await chrome.tabs.create({
@@ -112,6 +125,7 @@ chrome.runtime.onStartup.addListener(() => void ensureLogSyncAlarm());
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   await ensureLogSyncAlarm();
+  await injectAnnotationsIntoOpenTabs();
   if (reason !== "install") return;
   const missing = (await chrome.commands.getAll()).filter(({ shortcut }) => !shortcut);
   if (missing.length) {
@@ -122,7 +136,14 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "palette-data") return reply(getPaletteData(), sendResponse);
   if (message?.type === "sync-action-logs") return reply(syncActionLogs(), sendResponse);
-  if (message?.type === "reload-title-prefixes") return reply(reloadTitlePrefixes(), sendResponse);
+  if (message?.type === "reload-local-data") return reply(reloadLocalData(), sendResponse);
+  if (message?.type === "save-annotation") {
+    if (!sender.tab?.id) {
+      sendResponse({ ok: false, error: "Annotations can be saved only from a web page." });
+      return false;
+    }
+    return reply(saveAnnotation(message), sendResponse);
+  }
 
   if (message?.type === "execute-typed-command") {
     const tabId = sender.tab?.id;
@@ -297,18 +318,13 @@ async function runTitleCommand({ argument, separator }, tabId) {
     return;
   }
 
-  const directory = await getDataDirectory();
-  if (!directory || (await getDirectoryPermission(directory)) !== "granted") {
-    throw new Error("Connect the local data folder in Settings first.");
-  }
-
   const event = {
     eventId: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     url,
     prefix: prefix || null,
   };
-  await appendText(directory, "titles.jsonl", `${JSON.stringify(event)}\n`);
+  await appendSerially(await connectedDirectory(), "titles.jsonl", `${JSON.stringify(event)}\n`);
 
   if (prefix) titlePrefixes[url] = prefix;
   else delete titlePrefixes[url];
@@ -383,6 +399,8 @@ async function runItem(item, tabId) {
   if (item.id === "command:copy-current-page") return copyCurrentPage(tabId);
   if (item.id === "command:toggle-github") return toggleGithub(tabId);
   if (item.id === "command:settings") return chrome.runtime.openOptionsPage();
+  // The palette opens the editor itself after closing, so focus lands in the editor.
+  if (item.id === "command:annotate") return { effect: { type: "annotate" } };
   throw new Error(`Unknown command: ${item.label}`);
 }
 
@@ -466,7 +484,36 @@ async function updateTabTitle(tabId, previousPrefix, prefix) {
   });
 }
 
-async function reloadTitlePrefixes() {
+async function saveAnnotation({ site, id, text, label, url, account }) {
+  if (!ANNOTATION_SITES.includes(site) || typeof id !== "string" || !id.startsWith(`${site}:`)) {
+    throw new Error("Unknown annotation item.");
+  }
+  if (id.length > 1000) throw new Error("Annotation item ID is too long.");
+  const note = String(text ?? "").trim();
+  if (note.length > 20_000) throw new Error("Annotation is too long.");
+
+  const key = `${ANNOTATION_PREFIX}${id}`;
+  const { [key]: previous } = await chrome.storage.local.get(key);
+  if ((previous?.text || "") === note) return { unchanged: true };
+
+  // Flat, self-describing events so the file is also a readable to-do history.
+  const event = {
+    eventId: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    site,
+    id,
+    text: note || null,
+    label: String(label ?? "").slice(0, 300),
+    url: String(url ?? ""),
+    ...(account ? { account: String(account) } : {}),
+  };
+  await appendSerially(await connectedDirectory(), "annotations.jsonl", `${JSON.stringify(event)}\n`);
+  if (note) await chrome.storage.local.set({ [key]: { text: note } });
+  else await chrome.storage.local.remove(key);
+  return {};
+}
+
+async function reloadLocalData() {
   const directory = await getDataDirectory();
   if (!directory) return { loaded: 0, reason: "no-directory" };
   if ((await getDirectoryPermission(directory)) !== "granted") {
@@ -474,8 +521,44 @@ async function reloadTitlePrefixes() {
   }
 
   const titlePrefixes = replayTitleEvents(await readText(directory, "titles.jsonl"));
-  await chrome.storage.local.set({ titlePrefixes });
-  return { loaded: Object.keys(titlePrefixes).length };
+  const annotations = replayAnnotationEvents(await readText(directory, "annotations.jsonl"));
+  const stale = Object.keys(await chrome.storage.local.get(null)).filter(
+    (key) => key.startsWith(ANNOTATION_PREFIX) && !(key.slice(ANNOTATION_PREFIX.length) in annotations),
+  );
+  await chrome.storage.local.remove(stale);
+  await chrome.storage.local.set({
+    titlePrefixes,
+    ...Object.fromEntries(
+      Object.entries(annotations).map(([id, text]) => [`${ANNOTATION_PREFIX}${id}`, { text }]),
+    ),
+  });
+  return { loaded: Object.keys(titlePrefixes).length + Object.keys(annotations).length };
+}
+
+// Manifest content scripts reach only newly loaded pages; cover tabs already open on install/reload.
+async function injectAnnotationsIntoOpenTabs() {
+  const [{ matches, js }] = chrome.runtime.getManifest().content_scripts ?? [{}];
+  if (!matches?.length || !js?.length) return;
+  for (const tab of await chrome.tabs.query({ url: matches })) {
+    if (!tab.id || tab.discarded) continue;
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: js }).catch(() => {});
+  }
+}
+
+async function connectedDirectory() {
+  const directory = await getDataDirectory();
+  if (!directory || (await getDirectoryPermission(directory)) !== "granted") {
+    throw new Error("Connect the local data folder in Settings first.");
+  }
+  return directory;
+}
+
+// One append at a time: concurrent appends to one file could each seek to the same old end.
+let appendQueue = Promise.resolve();
+function appendSerially(directory, filename, text) {
+  const run = appendQueue.then(() => appendText(directory, filename, text));
+  appendQueue = run.catch(() => {});
+  return run;
 }
 
 async function exportLogs() {
@@ -568,7 +651,7 @@ async function syncActionLogs() {
 
   for (const [month, entries] of byMonth) {
     const text = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
-    await appendText(directory, `actions-${month}.jsonl`, text);
+    await appendSerially(directory, `actions-${month}.jsonl`, text);
     synced += entries.length;
 
     // Re-read before acknowledging so actions recorded during the file write are never dropped.

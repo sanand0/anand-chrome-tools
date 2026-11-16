@@ -353,6 +353,12 @@
     if (effect.type === "download") {
       downloadText(effect.filename, effect.text);
     }
+    if (effect.type === "annotate") {
+      // annotations.js shares this isolated world on supported sites.
+      const openEditor = globalThis.AnandAnnotations?.openEditor;
+      if (!openEditor) throw new Error("Annotate works on Gmail, Google Calendar, ChatGPT, and Claude.");
+      setTimeout(() => void openEditor(), 0); // after the palette closes and releases focus
+    }
   }
 
   async function copyText(text) {

@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { appendText, replayTitleEvents } from "./filesystem.js";
+import { appendText, replayAnnotationEvents, replayTitleEvents } from "./filesystem.js";
 await import("./palette-core.js");
 const {
   bookmarkletCode,
+  calendarItemId,
   commandModeItems,
   findBookmarklets,
   githubTarget,
+  lastEmail,
   migrateBookmarkletUsage,
+  noteLines,
   parseCommandInput,
   recentUsageCounts,
   rankItems,
@@ -24,10 +27,20 @@ test("manifest wires the command palette with only required capabilities", () =>
   assert.equal(manifest.background?.type, "module");
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["alarms", "bookmarks", "scripting", "storage", "tabGroups", "tabs", "userScripts"].sort(),
+    ["alarms", "bookmarks", "scripting", "storage", "tabGroups", "tabs", "unlimitedStorage", "userScripts"].sort(),
   );
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
-  assert.equal(manifest.content_scripts, undefined);
+  // The only persistent content script is the annotation layer, limited to the annotated sites.
+  assert.equal(manifest.content_scripts.length, 1);
+  assert.deepEqual(manifest.content_scripts[0].js, ["palette-core.js", "annotations.js"]);
+  assert.deepEqual(manifest.content_scripts[0].matches, [
+    "https://mail.google.com/*",
+    "https://calendar.google.com/*",
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://claude.com/*",
+  ]);
+  assert.deepEqual(manifest.commands.annotate?.suggested_key, { default: "Alt+Shift+M" });
   assert.deepEqual(manifest.options_ui, { page: "settings.html", open_in_tab: true });
   assert.ok(manifest.commands?.["open-command-palette"]);
   assert.deepEqual(manifest.commands["open-command-palette"].suggested_key, {
@@ -43,6 +56,7 @@ test("manifest and on-demand injection reference existing local files", () => {
     "service-worker.js",
     "palette-core.js",
     "content-script.js",
+    "annotations.js",
     "filesystem.js",
     "settings.html",
     "settings.js",
@@ -133,6 +147,78 @@ test("title event replay materializes the latest prefix per URL", () => {
   assert.deepEqual(replayTitleEvents(text), { "https://b.test/": "B" });
 });
 
+test("annotation replay keeps the latest note per item and drops deletions", () => {
+  const text = [
+    JSON.stringify({ id: "gmail:a@x.com:thread-f:1", text: "Reply" }),
+    JSON.stringify({ id: "chatgpt:u1", text: "Recreate" }),
+    "not json",
+    JSON.stringify({ id: "gmail:a@x.com:thread-f:1", text: "Reply with deck" }),
+    JSON.stringify({ id: "chatgpt:u1", text: null }),
+  ].join("\n");
+  assert.deepEqual(replayAnnotationEvents(text), { "gmail:a@x.com:thread-f:1": "Reply with deck" });
+});
+
+test("annotation text supports bold, italics, hashtags, and line breaks", () => {
+  assert.deepEqual(noteLines("Send **deck** to _Ravi_ #todo\n*soon* (#p1)"), [
+    [
+      { text: "Send " },
+      { text: "deck", bold: true },
+      { text: " to " },
+      { text: "Ravi", italic: true },
+      { text: " " },
+      { text: "#todo", tag: true },
+    ],
+    [{ text: "soon", italic: true }, { text: " (" }, { text: "#p1", tag: true }, { text: ")" }],
+  ]);
+  // Identifiers, URL fragments, C#, emails, and arithmetic stay plain text.
+  assert.deepEqual(noteLines("snake_case_name page#x C# bob@x.com 2*3*4"), [
+    [{ text: "snake_case_name page#x C# bob@x.com 2*3*4" }],
+  ]);
+  // @tags are distinct from #hashtags and exclude trailing punctuation.
+  assert.deepEqual(noteLines("Ask @ravi and @priya.k. (#deck)"), [
+    [
+      { text: "Ask " },
+      { text: "@ravi", mention: true },
+      { text: " and " },
+      { text: "@priya.k", mention: true },
+      { text: ". (" },
+      { text: "#deck", tag: true },
+      { text: ")" },
+    ],
+  ]);
+  assert.deepEqual(noteLines("**#urgent** call"), [[{ text: "#urgent", bold: true, tag: true }, { text: " call" }]]);
+});
+
+test("calendar IDs include the calendar and are specific to each recurrence", () => {
+  const eid = (text) => btoa(text).replaceAll("=", "");
+  assert.equal(calendarItemId(eid("abc123 me@m")), "gcal:me@m/abc123");
+  assert.equal(calendarItemId(eid("abc123_20261115 me@m")), "gcal:me@m/abc123_20261115");
+  assert.equal(calendarItemId(eid("abc123_20261117T030000Z me@m")), "gcal:me@m/abc123_20261117T030000Z");
+  assert.notEqual(calendarItemId(eid("abc123_20261115 me@m")), calendarItemId(eid("abc123_20261116 me@m")));
+  assert.notEqual(calendarItemId(eid("abc123 me@m")), calendarItemId(eid("abc123 other@m")));
+  assert.equal(calendarItemId(""), null);
+});
+
+test("Gmail account comes from the last email in the title", () => {
+  assert.equal(lastEmail("Re: ping bob@x.com - me@gmail.com - Gmail"), "me@gmail.com");
+  assert.equal(lastEmail("Google Account: Anand S\n(me@work.co)"), "me@work.co");
+  assert.equal(lastEmail("Inbox - Gmail"), null);
+});
+
+test("annotations are stored per item, appended to JSONL, and rebuilt from the file", () => {
+  const worker = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8");
+  const content = readFileSync(new URL("./annotations.js", import.meta.url), "utf8");
+  assert.match(worker, /appendSerially\(await connectedDirectory\(\), "annotations\.jsonl",/);
+  assert.match(worker, /const ANNOTATION_PREFIX = "annotation:"/);
+  assert.match(worker, /replayAnnotationEvents\(await readText\(directory, "annotations\.jsonl"\)\)/);
+  assert.match(worker, /name === "annotate"[\s\S]*type: "open-annotation-editor"/);
+  assert.match(worker, /item\.id === "command:annotate"\) return \{ effect: \{ type: "annotate" \} \}/);
+  // Content scripts fetch only the keys of visible items and render with DOM APIs.
+  assert.match(content, /chrome\.storage\.local\.get\(ids\.map\(\(id\) => STORAGE_PREFIX \+ id\)\)/);
+  assert.doesNotMatch(content, /innerHTML/);
+  assert.match(content, /input\.slot = "input"/);
+});
+
 test("action log append preserves existing bytes and closes the file", async () => {
   const calls = [];
   const writable = {
@@ -212,7 +298,7 @@ test("Title command persists exact-URL events and reapplies decorated prefixes",
   assert.match(worker, /const TITLE_MARKER = "🔸"/);
   assert.match(worker, /title: \{ run: runTitleCommand \}/);
   assert.match(worker, /separator === " " && argument\.toLowerCase\(\) === "clear"/);
-  assert.match(worker, /appendText\(directory, "titles\.jsonl",/);
+  assert.match(worker, /appendSerially\(await connectedDirectory\(\), "titles\.jsonl",/);
   assert.match(worker, /chrome\.tabs\.onUpdated\.addListener/);
   assert.match(worker, /const prefix = titlePrefixes\[url\]/);
   assert.match(worker, /const decorated = `\$\{TITLE_MARKER\}\$\{prefix\}`/);
