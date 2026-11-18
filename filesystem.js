@@ -48,6 +48,19 @@ export async function readText(directory, filename) {
   }
 }
 
+// File System Access commits a replacement on close; an aborted write leaves the old file.
+export async function writeText(directory, filename, text) {
+  const handle = await directory.getFileHandle(filename, { create: true });
+  const writable = await handle.createWritable();
+  try {
+    await writable.write(text);
+    await writable.close();
+  } catch (error) {
+    await writable.abort().catch(() => {});
+    throw error;
+  }
+}
+
 // Replays an append-only JSONL event log into the latest value per key; a null value deletes the key.
 export function replayLatest(text, keyField, valueField) {
   const latest = {};

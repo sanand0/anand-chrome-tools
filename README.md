@@ -52,6 +52,33 @@ Notes are tied to stable item IDs, not titles or positions, so they survive rena
 
 Annotations require the local data folder (see [Local data](#local-data)); if it's not connected, the editor shows an error instead of silently losing the note. If a site redesign hides notes, your notes stay safe in the file; the extension needs a selector update in `annotations.js`.
 
+## Conversation backups
+
+The extension can save structured ChatGPT and Claude conversations to your local data folder as you browse. Each site is off by default and has its own opt-in. Capture uses data the page already receives or caches and makes no additional requests to either service.
+
+1. Reload the updated extension and open **Settings**. Choose a data folder and enable capture under **ChatGPT backups** or **Claude backups** for conversations you are authorized to save. Review the applicable service terms and workspace rules before enabling. [OpenAI Terms of Use](https://openai.com/policies/terms-of-use), [Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
+2. Reload existing ChatGPT tabs so capture starts before the app. Claude also attaches to already-loaded tabs. Open conversations, scroll to load older pages, or visit alternative replies to expose them.
+3. Check Settings for the last observation and folder save, pending fragments, provisional data, and snapshots that need review. Reopen a conversation to refresh its native JSON. Settings shows a freshness notice after six hours without a capture.
+
+| File in the data folder | Contents |
+| --- | --- |
+| `chatgpt-raw/<id>.json` or `claude-raw/<org>/<id>.json` | Latest accepted native JSON for that conversation. The first available snapshot may be provisional. |
+| `<id>.backup.json` alongside the snapshot | Coverage (`tree`, `branch`, or `partial`), hash, and source and capture timing. Check coverage before treating a snapshot as complete. |
+| `versions/<id>/<sha256>.json` beneath the same site or organization folder | Every distinct observed native snapshot or page, including candidates held for review. |
+| `observations/<tab>-<capture>.json` beneath the same site or organization folder | Snapshot provenance and the decision to accept or hold it. |
+| `<site>-raw/events/<tab>-<capture>/<index>.json` | Raw stream, RPC, and provisional response fragments. Join text chunks in numeric order. For binary chunks, Base64-decode each chunk separately and concatenate the bytes. |
+| `<site>-raw/diagnostics/<uuid>.json` | Capture, queue, and filesystem failures. |
+
+The raw folders are separate from the existing rendered ChatGPT archives and official exports. Use one browser profile per backup folder.
+
+### Recovery and coverage
+
+- If the folder is unavailable, pending fragments stay in this browser profile. Reconnect the folder and choose **Save pending backups** to retry. Unfinished responses are saved as provisional events. Turn capture off in Settings to stop observing while retaining files and pending data.
+- Older or conflicting snapshots are retained separately. Under **Review retained snapshots**, inspect the candidate file before choosing **Use reviewed candidate**. If Settings reports an integrity error, turn capture off, move the affected JSON and its matching metadata together to a recovery location, and inspect the retained versions before re-enabling capture and reopening the conversation.
+- Coverage follows what the app loads while you browse. A snapshot can contain a complete active branch, a tree, or a partial page. Separate pages and raw events are preserved without reconstructing a tree. Unopened conversations, alternative replies, and background updates may be missing.
+- ChatGPT observes conversation fetch responses and skips public share pages and recognized temporary chats. Claude also observes the conversation cache and retains binary conversation RPC responses. Capture excludes credential sources and can miss traffic if either app changes its routes, transport, or cache schema.
+- Attachments, artifacts, and tool results are retained as they appear in the observed data. Referenced binaries and separate project or artifact APIs are outside coverage. Each response is capped at 32 MiB, with a 1 MiB limit per SSE record. Interrupted or limited captures stay provisional.
+
 ## Commands
 
 - **Annotate** — add or edit a note on the hovered/focused item, or on the open thread/chat/event. Same as **Alt+Shift+M**.
@@ -60,7 +87,7 @@ Annotations require the local data folder (see [Local data](#local-data)); if it
 - **Copy current page** — copy the current page as `[title](URL)`.
 - **Toggle Github** — switch between a GitHub repository and its standard GitHub Pages site when available.
 - **Repeat last command** — rerun the last successful repeatable palette item.
-- **Settings** — choose/change the local data folder and manually sync pending action logs.
+- **Settings** — choose the local data folder, sync pending action logs, and manage conversation backups.
 - **Export command logs** — download the recent in-browser command history as TSV.
 
 Typed commands are case-insensitive. Once you enter a parameterized command such as `Title ` or `Title: `, the palette stays in that command mode: your free-text invocation remains runnable while related explicit commands such as **Title clear** stay visible. For Title, everything after the first colon is the prefix, so `title: Project X` and `Title: prefix: more text` both work. `Title clear` clears the prefix, while `Title: clear` deliberately sets the literal prefix `clear`.
@@ -69,7 +96,7 @@ Title preferences are matched against the exact page URL, including its query st
 
 ## Local data
 
-The selected folder (e.g. `~/Documents/data/anand-chrome-tools/`) contains three kinds of data:
+The selected folder (e.g. `~/Documents/data/anand-chrome-tools/`) contains the following files, plus the site directories if you enable [conversation backups](#conversation-backups).
 
 - `annotations.jsonl` — an append-only history of annotations, written immediately. Each line records `eventId`, UTC `timestamp`, `site`, item `id`, `text` (`null` = deleted), the item's `label` (subject/title), a `url` to open it (Gmail URLs include the account), and `account` where known. The latest line per `id` is the current note, so the file doubles as a to-do list that scripts or agents can read: `jaq -s 'group_by(.id) | map(last | select(.text))' annotations.jsonl`. At about 30 annotations/day events average ~300 bytes, so the file grows ~3–5 MB/year including edits. JSONL is fine for decades at that rate.
 - `titles.jsonl` — an append-only history of Title changes. Each line records the UTC timestamp, exact URL, and prefix; a `null` prefix means the saved title was cleared. Title changes are written immediately.
@@ -85,14 +112,15 @@ The palette works on ordinary `http://` and `https://` pages. Browser-internal o
 
 The extension is dependency-free Manifest V3 with no build step.
 
-- `manifest.json` declares permissions and browser shortcuts. The only persistent content script is `annotations.js`, and it loads only on the annotated sites.
+- `manifest.json` declares permissions, browser shortcuts, and where `annotations.js` runs.
 - `annotations.js` renders and edits notes. Each site is a short data-driven list of item specs: a selector, an ID function, and where/how to place the note. To support another site, add an entry to `SITES`.
-- `service-worker.js` injects the palette on demand and owns browser APIs: discovering items, executing actions, switching tabs, logging, and export.
-- `palette-core.js` contains pure logic shared by the browser and tests: search/ranking, bookmark discovery/decoding, and GitHub URL mapping.
+- `service-worker.js` injects the palette on demand and handles browser actions, logging, export, and the conversation backup queues and disk writes.
+- `chatgpt-capture.js` observes conversation data in the page's main world. `chatgpt-bridge.js` relays bounded fragments from the isolated world. The worker registers both scripts at document start for each enabled site.
+- `palette-core.js` contains shared logic for search and ranking, bookmarklets, GitHub URL mapping, and backup snapshot classification and promotion.
 - `content-script.js` is an idempotent injected palette UI and applies clipboard/download effects returned by the worker.
 - `settings.html` / `settings.js` provide the minimal local-data UI; the browser's directory picker is the permission boundary.
-- `filesystem.js` stores the selected directory handle in IndexedDB and contains the small append helper shared by settings and the service worker.
-- `test.js` covers manifest wiring and pure behavior.
+- `filesystem.js` stores the selected directory handle in IndexedDB and contains the file read, write, and append helpers shared by settings and the service worker.
+- `test.js` covers manifest wiring, shared logic, and backup regressions.
 
 Annotation design notes:
 
@@ -115,9 +143,9 @@ Permissions are intentionally limited to the implemented features:
 - `alarms` — one-shot daily flush of pending action logs.
 - `bookmarks` — discover bookmarklets.
 - `tabs` and `tabGroups` — search and switch open tabs.
-- `storage` — current notes, pending action queue, recent logs, usage/frecency, and last-command state.
-- `unlimitedStorage` — notes accumulate (roughly 3 MB/year at 30/day if never cleared). Without it, `chrome.storage.local`'s 10 MB quota would eventually make saves fail.
-- `scripting` plus `http://*/*` / `https://*/*` host access — inject the palette into the active page on demand, run the annotation content script on Gmail, Calendar, ChatGPT, and Claude, and re-inject it into open tabs after an update.
+- `storage` — current notes, pending action and conversation backup queues, recent logs, usage/frecency, and last-command state. Backup data uses local storage, never sync storage.
+- `unlimitedStorage` — notes and queued backups can exceed the default 10 MB quota. It does not guarantee free disk space; write errors remain visible and queued data is retained.
+- `scripting` plus `http://*/*` / `https://*/*` host access — inject the palette, run/re-inject annotations, and register opt-in MAIN/isolated observers restricted to ChatGPT or Claude origins. No additional permissions were introduced for backups.
 - `userScripts` — execute bookmarklet code in the page's main world.
 
 Keep the repo flat and dependency-free unless a feature clearly justifies another boundary.

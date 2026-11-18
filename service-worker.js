@@ -8,11 +8,13 @@ import {
   readText,
   replayAnnotationEvents,
   replayTitleEvents,
+  writeText,
 } from "./filesystem.js";
 
 const {
   bookmarkletCode, findBookmarklets, githubTarget, migrateBookmarkletUsage,
   parseCommandInput, recentUsageCounts, usageKey,
+  chatgptPromotion, chatgptSnapshot, claudeSnapshot,
 } = globalThis.AnandPaletteCore;
 
 const LOG_SYNC_ALARM = "sync-action-logs";
@@ -121,11 +123,18 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   });
 });
 
-chrome.runtime.onStartup.addListener(() => void ensureLogSyncAlarm());
+chrome.runtime.onStartup.addListener(() => {
+  void ensureLogSyncAlarm();
+  for (const site of ["chatgpt", "claude"]) {
+    void configureChatgptCapture(site).catch((error) => backupError(error, {}, site));
+    void serialBackup(() => flushChatgptCaptures(true, site)).catch((error) => backupError(error, {}, site));
+  }
+});
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   await ensureLogSyncAlarm();
   await injectAnnotationsIntoOpenTabs();
+  for (const site of ["chatgpt", "claude"]) await configureChatgptCapture(site).catch((error) => backupError(error, {}, site));
   if (reason !== "install") return;
   const missing = (await chrome.commands.getAll()).filter(({ shortcut }) => !shortcut);
   if (missing.length) {
@@ -134,6 +143,20 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const site = message?.type?.startsWith("claude-") || message?.type?.includes("-claude-") ? "claude" : "chatgpt";
+  if (message?.type === `${site}-capture` || message?.type === `${site}-capture-error`) {
+    if (!sender.tab?.id || sender.frameId !== 0 || !BACKUP_SITES[site].origins.some((origin) => sender.url?.startsWith(`${origin}/`))) return false;
+    return reply(message.type === `${site}-capture`
+      ? receiveChatgptCapture(message.record, sender, site)
+      : backupError(String(message.error).slice(0, 300), { requiresReload: true, tabId: sender.tab.id }, site), sendResponse);
+  }
+  if ([`configure-${site}-backup`, `sync-${site}-backup`, `accept-${site}-candidate`].includes(message?.type)) {
+    if (sender.tab && sender.url !== chrome.runtime.getURL("settings.html")) return false;
+    if (message.type === `accept-${site}-candidate`) return reply(serialBackup(() => acceptChatgptCandidate(message.id, message.hash, site)), sendResponse);
+    return reply(message.type === `configure-${site}-backup`
+      ? setChatgptBackup(message.enabled === true, site)
+      : serialBackup(() => flushChatgptCaptures(true, site)).catch(async (error) => { await backupError(error, {}, site); throw error; }), sendResponse);
+  }
   if (message?.type === "palette-data") return reply(getPaletteData(), sendResponse);
   if (message?.type === "sync-action-logs") return reply(syncActionLogs(), sendResponse);
   if (message?.type === "reload-local-data") return reply(reloadLocalData(), sendResponse);
@@ -686,4 +709,281 @@ function tsvCell(value) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Passive conversation backups. Queue records have independent keys, so concurrent tabs cannot
+// overwrite each other's pending work. Only disk commits are serialized; no timers/alarms.
+const BACKUP_SITES = {
+  chatgpt: { origins: ["https://chatgpt.com"], snapshot: chatgptSnapshot,
+    route: /^\/backend-api\/(?:f\/)?conversations?(?:\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:\/[a-z_-]+)?)?$/i },
+  claude: { origins: ["https://claude.ai", "https://claude.com"], snapshot: claudeSnapshot,
+    route: /^\/(?:api\/organizations\/[0-9a-f-]{36}\/chat_conversations\/[0-9a-f-]{36}(?:\/[a-z_-]+)?|local\/claude-conversation-store\/trees\/[0-9a-f-]{36}\/[0-9a-f-]{36}|claudeai-rpc\/anthropic\.bard\.api\.v1alpha\.ConversationService\/(?:StreamTimeline|PerformAction))$/i },
+};
+const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+let backupQueue = Promise.resolve();
+function serialBackup(operation) {
+  const run = backupQueue.then(operation);
+  backupQueue = run.catch(() => {});
+  return run;
+}
+
+async function backupError(error, context = {}, site = "chatgpt") {
+  const { [`${site}BackupError`]: previous } = await chrome.storage.local.get(`${site}BackupError`);
+  const message = errorMessage(error);
+  const repeated = previous?.message === message && Boolean(previous.requiresReload) === Boolean(context.requiresReload) && previous.tabId === context.tabId;
+  const diagnostic = repeated ? { ...previous, lastAt: Date.now(), count: (previous.count || 1) + 1 } : { id: crypto.randomUUID(), at: Date.now(), message, name: error?.name || "CaptureError", version: chrome.runtime.getManifest().version, format: 1, ...context };
+  await chrome.storage.local.set({ [`${site}BackupError`]: diagnostic, [`${site}-diagnostic:${diagnostic.id}`]: diagnostic });
+  return {};
+}
+
+async function setChatgptBackup(enabled, site = "chatgpt") {
+  await chrome.storage.local.set({ [`${site}BackupEnabled`]: enabled });
+  if (enabled) await chrome.storage.local.set({ [`${site}BackupError`]: null });
+  await configureChatgptCapture(site);
+  if (enabled) await injectBackupIntoOpenTabs(site);
+  return { enabled };
+}
+
+async function injectBackupIntoOpenTabs(site) {
+  for (const tab of await chrome.tabs.query({ url: BACKUP_SITES[site].origins.map((origin) => `${origin}/*`) })) {
+    if (!tab.id || tab.discarded || tab.status === "unloaded") continue;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["chatgpt-capture.js"], world: "MAIN" });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["chatgpt-bridge.js"], world: "ISOLATED" });
+    } catch (error) {
+      await backupError(error, { requiresReload: true, tabId: tab.id }, site);
+    }
+  }
+}
+
+async function configureChatgptCapture(site = "chatgpt") {
+  const CAPTURE_SCRIPTS = [`${site}-backup-main`, `${site}-backup-bridge`];
+  const { [`${site}BackupEnabled`]: chatgptBackupEnabled = false } = await chrome.storage.local.get(`${site}BackupEnabled`);
+  const registered = await chrome.scripting.getRegisteredContentScripts({ ids: CAPTURE_SCRIPTS });
+  if (!chatgptBackupEnabled) {
+    if (registered.length) await chrome.scripting.unregisterContentScripts({ ids: registered.map(({ id }) => id) });
+    return;
+  }
+  const existing = new Set(registered.map(({ id }) => id));
+  const scripts = [
+    { id: CAPTURE_SCRIPTS[0], js: ["chatgpt-capture.js"], world: "MAIN" },
+    { id: CAPTURE_SCRIPTS[1], js: ["chatgpt-bridge.js"], world: "ISOLATED" },
+  ].filter(({ id }) => !existing.has(id)).map((script) => ({
+    ...script, matches: BACKUP_SITES[site].origins.map((origin) => `${origin}/*`), runAt: "document_start", persistAcrossSessions: true,
+  }));
+  if (scripts.length) await chrome.scripting.registerContentScripts(scripts);
+}
+
+function isSnapshotRequest(record, site = "chatgpt") {
+  if (site === "claude") return record.method === "CACHE" || (record.method === "GET" && /\/chat_conversations\/[0-9a-f-]{36}$/i.test(record.path));
+  return record.method === "GET" && /^\/backend-api\/conversations?\/[0-9a-f-]{36}(?:\/messages)?$/i.test(record.path);
+}
+
+async function receiveChatgptCapture(record, sender, site = "chatgpt") {
+  const { [`${site}BackupEnabled`]: chatgptBackupEnabled } = await chrome.storage.local.get(`${site}BackupEnabled`);
+  if (!chatgptBackupEnabled) throw new Error(`${site} backup is disabled.`);
+  // The MAIN world and its messages can be forged by the host page. Constrain paths,
+  // filenames, sizes and native IDs here; no page message ever grants a new capability.
+  if (!record || !UUID.test(record.captureId) || !Number.isInteger(record.index) || record.index < 0 || record.index > 4096 ||
+    !["start", "headers", "chunk", "diagnostic", "end"].includes(record.kind) || !Number.isFinite(record.startedAt) ||
+    !["GET", "POST", "PATCH", "DELETE", "PUT", ...(site === "claude" ? ["CACHE"] : [])].includes(record.method) ||
+    !BACKUP_SITES[site].route.test(record.path) ||
+    JSON.stringify(record).length > 256 * 1024 || (record.kind === "chunk" && (typeof record.text !== "string" || record.text.length > 128 * 1024))) {
+    throw new Error(`Invalid ${site} capture record.`);
+  }
+  if (site === "claude") {
+    const org = record.path.match(/\/(?:organizations|trees)\/([0-9a-f-]{36})\//i)?.[1];
+    if (org && !UUID.test(org)) throw new Error("Invalid Claude organization ID.");
+    if (record.method === "CACHE" && (!org || !record.path.startsWith("/local/claude-conversation-store/trees/"))) throw new Error("Invalid Claude cache capture.");
+    record = { ...record, organizationId: org || (UUID.test(record.organizationId || "") ? record.organizationId : null) };
+  }
+  // Incorporate the tab into the queue identity so a page cannot collide across tabs.
+  const key = `${site}-pending:${sender.tab.id}:${record.captureId}:${String(record.index).padStart(5, "0")}`;
+  try {
+    await chrome.storage.local.set({ [key]: { ...record, tabId: sender.tab.id, receivedAt: Date.now() }, [`${site}LastObservedAt`]: Date.now() });
+    if (record.kind === "start") {
+      const { [`${site}BackupError`]: error } = await chrome.storage.local.get(`${site}BackupError`);
+      if (error?.requiresReload && error.tabId === sender.tab.id && record.startedAt > error.at) await chrome.storage.local.set({ [`${site}BackupError`]: null });
+    }
+  } catch (error) {
+    await backupError(error, {}, site).catch(() => {});
+    throw error;
+  }
+  // Acknowledge durable browser storage first; disk availability never backpressures ChatGPT.
+  void serialBackup(() => flushChatgptCaptures(false, site)).catch((error) => backupError(error, {}, site));
+  return {};
+}
+
+async function flushChatgptCaptures(includeUnfinished = false, site = "chatgpt") {
+  const allKeys = await chrome.storage.local.getKeys();
+  const keys = allKeys.filter((key) => key.startsWith(`${site}-pending:`));
+  const diagnostics = allKeys.filter((key) => key.startsWith(`${site}-diagnostic:`));
+  if (!keys.length && !diagnostics.length) return { pending: 0 };
+  const directory = await connectedDirectory();
+  const root = await directory.getDirectoryHandle(`${site}-raw`, { create: true });
+  if (diagnostics.length) {
+    const folder = await root.getDirectoryHandle("diagnostics", { create: true });
+    const records = await chrome.storage.local.get(diagnostics);
+    for (const key of diagnostics) {
+      await writeText(folder, `${key.slice(`${site}-diagnostic:`.length)}.json`, JSON.stringify(records[key]));
+      await chrome.storage.local.remove(key);
+    }
+  }
+  const groups = Map.groupBy(keys.sort(), (key) => key.slice(0, key.lastIndexOf(":")));
+  for (const group of groups.values()) {
+    // Do not re-read a growing JSON snapshot for every fragment (quadratic copying).
+    const lastKey = group.at(-1);
+    const { [lastKey]: tail } = await chrome.storage.local.get(lastKey);
+    if (isSnapshotRequest(tail, site) && tail.kind !== "end" && !includeUnfinished) continue;
+    const stored = await chrome.storage.local.get(group);
+    const records = group.map((key) => stored[key]);
+    const first = records[0];
+    const scopedRoot = site === "claude" && first.organizationId ? await root.getDirectoryHandle(first.organizationId, { create: true }) : root;
+    const end = records.find((r) => r.kind === "end");
+    const contiguous = records[0].index === 0 && records.every((r, index) => r.index === index);
+    if (isSnapshotRequest(first, site) && !end && !includeUnfinished) continue;
+    if (isSnapshotRequest(first, site) && !contiguous && !includeUnfinished) continue;
+    let snapshot = false;
+    let snapshotIssue = "";
+    if (isSnapshotRequest(first, site) && end?.complete && contiguous && records.some((r) => r.kind === "headers" && r.status === 200)) {
+      const raw = records.filter((r) => r.kind === "chunk").map((r) => r.text).join("");
+      let value;
+      try { value = JSON.parse(raw); } catch { snapshotIssue = "Malformed JSON response"; }
+      const id = site === "claude" ? first.path.split("/").at(-1) : first.path.match(/\/([0-9a-f-]{36})(?:\/|$)/i)?.[1];
+      const info = BACKUP_SITES[site].snapshot(value, id, first.path.endsWith("/messages"), first.cache);
+      if (info) {
+        await saveChatgptSnapshot(scopedRoot, raw, value, info, { ...first, finishedAt: end.finishedAt }, site);
+        snapshot = true;
+      } else snapshotIssue ||= "Unrecognized snapshot shape, temporary chat or mismatched native ID";
+    }
+    if (!snapshot) {
+      const events = await root.getDirectoryHandle("events", { create: true });
+      const capture = await events.getDirectoryHandle(`${first.tabId}-${first.captureId}`, { create: true });
+      if (isSnapshotRequest(first, site)) {
+        await writeText(capture, "diagnostic.json", JSON.stringify({ format: 1, issue: snapshotIssue || end?.reason || (end?.complete ? "Response is not an accepted 200 JSON snapshot" : "Snapshot fragments incomplete or missing"), httpStatus: records.find((r) => r.kind === "headers")?.status ?? null, receivedAt: Date.now(), hasEnd: Boolean(end), contiguous }));
+      }
+      for (const record of records) {
+        const filename = `${String(record.index).padStart(5, "0")}.json`;
+        const text = `${JSON.stringify(record)}\n`;
+        const existing = await readText(capture, filename);
+        if (existing && existing !== text) throw new Error("Conflicting raw capture record; preserved pending data.");
+        if (!existing) await writeText(capture, filename, text);
+      }
+      const id = site === "claude"
+        ? first.path.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi)?.at(-1) || first.pageConversationId
+        : first.path.match(/\/([0-9a-f-]{36})(?:\/|$)/i)?.[1] || first.pageConversationId;
+      if (UUID.test(id || "") && (site !== "claude" || first.organizationId)) {
+        const stateKey = `${site}-state:${first.organizationId ? `${first.organizationId}:` : ""}${id}`;
+        const { [stateKey]: state = {} } = await chrome.storage.local.get(stateKey);
+        await chrome.storage.local.set({ [stateKey]: { ...state, lastEventAt: first.receivedAt, provisional: true } });
+      }
+    }
+    // The filesystem write commits before acknowledgement. A crash can replay an identical
+    // immutable part/version, but cannot delete the only copy of a queued capture.
+    await chrome.storage.local.remove(group);
+    const { [`${site}BackupError`]: error } = await chrome.storage.local.get(`${site}BackupError`);
+    await chrome.storage.local.set({ [`${site}LastSavedAt`]: Date.now(), ...(!error?.requiresReload ? { [`${site}BackupError`]: null } : {}) });
+  }
+  return { pending: (await chrome.storage.local.getKeys()).filter((key) => key.startsWith(`${site}-pending:`)).length };
+}
+
+async function snapshotHash(raw) {
+  // Hash original text, not a parsed/re-serialized object: JSON can carry integers
+  // beyond JavaScript's exact range. Unknown numeric fields must survive unchanged.
+  const bytes = new TextEncoder().encode(raw);
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function saveChatgptSnapshot(root, raw, value, info, capture, site = "chatgpt") {
+  const hash = await snapshotHash(raw);
+  const versions = await root.getDirectoryHandle("versions", { create: true });
+  const history = await versions.getDirectoryHandle(info.id, { create: true });
+  const versionName = `${hash}.json`;
+  const existing = await readText(history, versionName);
+  if (existing) {
+    if (await snapshotHash(existing) !== hash) throw new Error("Backup version is corrupt; nothing replaced.");
+  } else await writeText(history, versionName, raw);
+
+  const filename = `${info.id}.json`;
+  const metaName = `${info.id}.backup.json`;
+  const currentText = await readText(root, filename);
+  const metaText = await readText(root, metaName);
+  let previous;
+  let meta;
+  let reason;
+  try {
+    meta = metaText ? JSON.parse(metaText) : null;
+    if (currentText) {
+      const current = JSON.parse(currentText);
+      const previousInfo = BACKUP_SITES[site].snapshot(current, info.id, meta?.path?.endsWith("/messages"), meta?.cache);
+      const currentHash = await snapshotHash(currentText);
+      // Save even a manually replaced current file before considering any overwrite.
+      const retained = await readText(history, `${currentHash}.json`);
+      if (!retained) await writeText(history, `${currentHash}.json`, currentText);
+      if (retained && await snapshotHash(retained) !== currentHash) reason = "corrupt-previous-version";
+      else if (currentHash === hash) {
+        // Recover a crash between the native file commit and its metadata commit.
+        reason = "unchanged";
+      } else if (!previousInfo || !meta || meta.hash !== currentHash) reason = "current-metadata-mismatch";
+      else previous = { ...previousInfo, ...meta };
+    }
+  } catch {
+    reason = "unreadable-current-or-metadata";
+  }
+  const next = { ...info, startedAt: capture.startedAt, finishedAt: capture.finishedAt };
+  reason ??= chatgptPromotion(previous, next);
+  if (capture.reviewedAt && info.coverage !== "partial" && !["unreadable-current-or-metadata", "current-metadata-mismatch", "corrupt-previous-version"].includes(reason)) reason = "reviewed";
+  const provenance = {
+    hash, coverage: info.coverage, startedAt: capture.startedAt, finishedAt: capture.finishedAt,
+    updateTime: info.updateTime, path: capture.path, captureId: capture.captureId, tabId: capture.tabId,
+    query: capture.query || {}, queryKeys: capture.queryKeys || [], format: 1,
+    ...(capture.organizationId ? { organizationId: capture.organizationId } : {}),
+    ...(capture.cache ? { cache: capture.cache, source: "indexeddb" } : {}),
+    ...(capture.reviewedAt ? { reviewedAt: capture.reviewedAt } : {}),
+  };
+  // One tiny observation record per request, including duplicate observations and holds.
+  const observations = await root.getDirectoryHandle("observations", { create: true });
+  await writeText(observations, `${capture.tabId}-${capture.captureId}.json`, JSON.stringify({ ...provenance, id: info.id, decision: reason }));
+  if (["promote", "promote-provisional", "reviewed"].includes(reason)) {
+    await writeText(root, filename, raw);
+    await writeText(root, metaName, JSON.stringify(provenance));
+  } else if (reason === "unchanged" && (!meta || meta.hash !== hash || capture.startedAt > meta.finishedAt)) {
+    await writeText(root, metaName, JSON.stringify(provenance));
+  }
+  const stateKey = `${site}-state:${capture.organizationId ? `${capture.organizationId}:` : ""}${info.id}`;
+  const { [stateKey]: state = {} } = await chrome.storage.local.get(stateKey);
+  const accepted = ["promote", "promote-provisional", "unchanged", "reviewed"].includes(reason);
+  const candidate = accepted
+    ? { needsReview: null, candidate: null, candidateMeta: null, candidateTitle: null }
+    : info.coverage === "partial" ? {} : {
+      needsReview: reason, candidate: `${site}-raw/${capture.organizationId ? `${capture.organizationId}/` : ""}versions/${info.id}/${hash}.json`,
+      candidateMeta: provenance, candidateTitle: String(value.title || info.id),
+    };
+  await chrome.storage.local.set({ [stateKey]: {
+    ...state, lastSnapshotAt: Date.now(), coverage: accepted ? info.coverage : state.coverage,
+    provisional: !accepted || info.coverage === "partial", ...candidate,
+    ...(accepted ? { hash, lastAcceptedAt: Date.now() } : {}),
+  } });
+}
+
+async function acceptChatgptCandidate(id, hash, site = "chatgpt") {
+  const stateId = id;
+  let organizationId;
+  if (site === "claude") [organizationId, id] = String(id).split(":");
+  if (site === "claude" && !UUID.test(organizationId || "")) throw new Error("Invalid Claude organization ID.");
+  if (!UUID.test(id) || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid retained snapshot.");
+  const { [`${site}-state:${stateId}`]: state } = await chrome.storage.local.get(`${site}-state:${stateId}`);
+  if (state?.candidateMeta?.hash !== hash) throw new Error("The retained candidate changed. Refresh Settings and review it again.");
+  if (state.candidateMeta.coverage === "partial") throw new Error("A partial snapshot cannot replace the current conversation. Reopen it for a complete branch or tree.");
+  let root = await (await connectedDirectory()).getDirectoryHandle(`${site}-raw`);
+  if (organizationId) root = await root.getDirectoryHandle(organizationId);
+  const history = await (await root.getDirectoryHandle("versions")).getDirectoryHandle(id);
+  const raw = await readText(history, `${hash}.json`);
+  const value = JSON.parse(raw);
+  const info = BACKUP_SITES[site].snapshot(value, id, false, state.candidateMeta.cache);
+  if (!info || await snapshotHash(raw) !== hash) throw new Error("Retained snapshot is invalid or corrupt.");
+  await saveChatgptSnapshot(root, raw, value, info, { ...state.candidateMeta, captureId: crypto.randomUUID(), reviewedAt: Date.now() }, site);
+  const { [`${site}-state:${stateId}`]: result } = await chrome.storage.local.get(`${site}-state:${stateId}`);
+  if (result.hash !== hash || result.needsReview) throw new Error("Current backup needs integrity repair. The candidate remains retained; see README.");
+  return {};
 }

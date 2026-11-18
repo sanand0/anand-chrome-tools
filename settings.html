@@ -34,6 +34,7 @@
         background: light-dark(#fff, #222);
         border: 1px solid light-dark(#ddd, #383838);
         border-radius: 10px;
+        margin-block-end: 16px;
       }
       h2 {
         margin: 0 0 14px;
@@ -98,6 +99,10 @@
       #status.error {
         color: light-dark(#a52020, #ff938f);
       }
+      a { color: light-dark(#245cad, #99bdff); }
+      input[type="checkbox"] { margin-inline-end: 8px; }
+      .error { color: light-dark(#a52020, #ff938f); }
+      #chatgpt-candidates, #claude-candidates { padding-inline-start: 20px; overflow-wrap: anywhere; }
     </style>
   </head>
   <body>
@@ -119,6 +124,36 @@
           <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
         </div>
         <p id="status" role="status" aria-live="polite"></p>
+      </section>
+      <section>
+        <h2>ChatGPT backups</h2>
+        <p>Save conversations you browse into <code>chatgpt-raw/</code> in the data folder. Capture stays on this computer and makes no extra ChatGPT requests.</p>
+        <p>Review the <a href="https://openai.com/policies/terms-of-use/" target="_blank" rel="noreferrer">OpenAI Terms of Use</a> and your workspace rules before enabling. The terms prohibit automatic or programmatic extraction of data or Output; passive backups are not explicitly exempted.</p>
+        <label><input id="chatgpt-enable" type="checkbox" />Enable capture for conversations I am authorized to save</label>
+        <p class="detail" id="chatgpt-detail" role="status" aria-live="polite">Capture is off.</p>
+        <div class="actions">
+          <button id="chatgpt-sync" type="button" class="secondary">Save pending backups</button>
+        </div>
+        <details id="chatgpt-review" hidden>
+          <summary>Review retained snapshots</summary>
+          <p>Open the candidate JSON in your data folder before accepting it. Previous versions remain available. Partial captures cannot replace the current file.</p>
+          <ul id="chatgpt-candidates"></ul>
+        </details>
+        <p class="detail">Reload existing ChatGPT tabs after enabling. Native snapshots may cover only the active branch; streams, pages and uncertain versions are retained separately. Reopen a conversation to refresh it.</p>
+      </section>
+      <section>
+        <h2>Claude backups</h2>
+        <p>Save native conversation-cache JSON and exact conversation RPC bytes into <code>claude-raw/</code> in the data folder. No extra Claude requests.</p>
+        <p>Review the <a href="https://www.anthropic.com/legal/consumer-terms" target="_blank" rel="noreferrer">Anthropic Consumer Terms</a> and workspace rules. They restrict harvesting and automated access; passive local backups are not explicitly exempted.</p>
+        <label><input id="claude-enable" type="checkbox" />Enable Claude capture for conversations I am authorized to save</label>
+        <p class="detail" id="claude-detail" role="status" aria-live="polite">Capture is off.</p>
+        <div class="actions"><button id="claude-sync" type="button" class="secondary">Save pending backups</button></div>
+        <details id="claude-review" hidden>
+          <summary>Review retained snapshots</summary>
+          <p>Inspect the indicated local JSON before accepting it. Previous versions remain available. Partial captures cannot replace a better snapshot.</p>
+          <ul id="claude-candidates"></ul>
+        </details>
+        <p class="detail">The cached transcript may omit alternative branches or older messages. Raw RPC data is preserved separately. Linked binary attachments and independent project resources are not downloaded.</p>
       </section>
     </main>
     <script type="module" src="settings.js"></script>

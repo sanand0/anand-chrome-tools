@@ -323,7 +323,104 @@
   // The account email is the last email-like token, e.g. in "Subject - me@example.com - Gmail".
   const lastEmail = (text) => String(text ?? "").match(/[^\s@()<>"]+@[^\s@()<>"]+\.[^\s@()<>"]+/g)?.at(-1) ?? null;
 
+  // Used only for comparisons. The saved native object is never normalized.
+  function chatgptJSON(value) {
+    if (Array.isArray(value)) return `[${value.map(chatgptJSON).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${chatgptJSON(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  function chatgptSnapshot(value, expectedId, messagePage = false) {
+    if (!value || typeof value !== "object" || value.is_temporary_chat) return null;
+    const id = value.conversation_id ?? value.id ?? (messagePage ? expectedId : null);
+    if (id !== expectedId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) return null;
+    const messages = Object.create(null);
+    let coverage = "partial";
+    if (value.mapping && typeof value.mapping === "object" && !Array.isArray(value.mapping)) {
+      const nodes = Object.entries(value.mapping);
+      const roots = nodes.filter(([, n]) => n?.parent === null);
+      const valid = nodes.length && roots.length === 1 && Object.hasOwn(value.mapping, value.current_node) && nodes.every(([key, n]) =>
+        n && n.id === key && Array.isArray(n.children) &&
+        new Set(n.children).size === n.children.length &&
+        (n.message === null || (n.message && typeof n.message === "object" && n.message.id === key && n.message.content && typeof n.message.content === "object")) &&
+        (n.parent === null || value.mapping[n.parent]?.children?.includes(key)) &&
+        n.children.every((child) => Object.hasOwn(value.mapping, child) && value.mapping[child]?.parent === key));
+      const seen = new Set();
+      const pending = valid ? [roots[0][0]] : [];
+      while (pending.length) {
+        const key = pending.pop();
+        if (seen.has(key)) break;
+        seen.add(key);
+        pending.push(...value.mapping[key].children);
+      }
+      for (const [key, node] of nodes) if (node?.message) messages[key] = node.message;
+      if (valid && !pending.length && seen.size === nodes.length) coverage = "tree";
+    } else if (Array.isArray(value.messages)) {
+      for (const message of value.messages) if (message?.id) messages[message.id] = message;
+      if (!messagePage && value.messages.length && Object.keys(messages).length === value.messages.length &&
+        value.messages.every((m) => typeof m?.id === "string" && m.id && m.content && typeof m.content === "object") &&
+        Object.hasOwn(messages, value.current_node) && value.page_info?.has_previous_page === false &&
+        value.page_info?.has_next_page === false) coverage = "branch";
+    } else return null;
+    if (messages[value.current_node]?.status === "in_progress") coverage = "partial";
+    return { id, coverage, messages, updateTime: typeof value.update_time === "number" && Number.isFinite(value.update_time) ? value.update_time : null };
+  }
+
+  // Missing/changed content can mean deletion, a branch switch, a page or a stale server.
+  // Keep the candidate and require review instead of guessing or unioning mutable documents.
+  function chatgptPromotion(previous, next) {
+    if (!previous) return next.coverage === "partial" ? "promote-provisional" : "promote";
+    if (next.coverage === "partial" && previous.coverage !== "partial") return "partial";
+    if (previous.coverage === "tree" && next.coverage !== "tree") return "lower-coverage";
+    if (next.startedAt <= previous.finishedAt) return "overlapping-or-delayed";
+    if (typeof next.fetchedAt === "number" && typeof previous.fetchedAt === "number" && next.fetchedAt < previous.fetchedAt) return "older-cache-time";
+    if (next.updateTime !== null && previous.updateTime !== null && next.updateTime < previous.updateTime) return "older-server-time";
+    for (const [id, message] of Object.entries(previous.messages)) {
+      if (!Object.hasOwn(next.messages, id)) return "missing-messages";
+      if (chatgptJSON(message.content) !== chatgptJSON(next.messages[id].content)) return "changed-message-content";
+      for (const key of ["attachments", "files", "files_v2", "sync_sources"]) {
+        if (Object.hasOwn(message, key) && chatgptJSON(message[key]) !== chatgptJSON(next.messages[id][key])) return `changed-message-${key}`;
+      }
+    }
+    return next.coverage === "partial" ? "promote-provisional" : "promote";
+  }
+
+  function claudeSnapshot(value, expectedId, _page = false, cache = {}) {
+    if (!value || typeof value !== "object") return null;
+    const id = value.uuid ?? value.conversationUuid;
+    if (id !== expectedId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) return null;
+    const list = value.chat_messages ?? (value.kind === "hub_transcript" ? value.messages : null);
+    if (!Array.isArray(list)) return null;
+    const messages = Object.create(null);
+    for (const m of list) if (typeof m?.uuid === "string") messages[m.uuid] = m;
+    const checked = new Set();
+    let cycle = false;
+    for (const message of list) {
+      let parent = message?.uuid;
+      const path = new Set();
+      while (Object.hasOwn(messages, parent) && !checked.has(parent)) {
+        if (path.has(parent)) { cycle = true; break; }
+        path.add(parent);
+        parent = messages[parent].parent_message_uuid;
+      }
+      for (const id of path) checked.add(id);
+    }
+    let coverage = "partial";
+    const root = "00000000-0000-4000-8000-000000000000";
+    if (!cycle && list.length === Object.keys(messages).length && list.every((m) => Array.isArray(m.content)) &&
+      (value.kind !== "hub_transcript" || (value.historyWindow?.mode === "full" && list.every((m) => !m.parent_message_uuid || m.parent_message_uuid === root || Object.hasOwn(messages, m.parent_message_uuid))))) coverage = "branch";
+    if (list.at(-1)?.sender === "assistant" && list.at(-1).content?.some((block) => block.stopped === false)) coverage = "partial";
+    const updateTime = typeof cache.conversationUpdatedAt === "number" ? cache.conversationUpdatedAt : Date.parse(value.updated_at);
+    return { id, coverage, messages, updateTime: Number.isFinite(updateTime) ? updateTime : null, ...(typeof cache.fetchedAt === "number" ? { fetchedAt: cache.fetchedAt } : {}) };
+  }
+
   globalThis.AnandPaletteCore = {
+    chatgptJSON,
+    chatgptPromotion,
+    chatgptSnapshot,
+    claudeSnapshot,
     bookmarkletCode,
     calendarItemId,
     lastEmail,

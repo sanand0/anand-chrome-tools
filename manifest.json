@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "135",
   "name": "Anand Chrome Tools",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Small personal browser automations and shortcuts.",
   "permissions": ["alarms", "bookmarks", "scripting", "storage", "tabGroups", "tabs", "unlimitedStorage", "userScripts"],
   "host_permissions": ["http://*/*", "https://*/*"],
