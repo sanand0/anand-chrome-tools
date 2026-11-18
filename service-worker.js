@@ -478,7 +478,7 @@ async function applyStoredTitlePrefix(tabId, tab) {
   const { titlePrefixes = {} } = await chrome.storage.local.get(["titlePrefixes"]);
   const prefix = titlePrefixes[url];
   const decorated = `${TITLE_MARKER}${prefix}`;
-  if (!prefix || (tab.title || "").startsWith(decorated)) return;
+  if (!prefix || (tab.title || "").startsWith(`${decorated}${TITLE_MARKER}`)) return;
   await updateTabTitle(tabId, "", prefix);
 }
 
@@ -490,16 +490,16 @@ async function updateTabTitle(tabId, previousPrefix, prefix) {
       const decoratedPrevious = previous && `${marker}${previous}`;
 
       if (decoratedPrevious && title.startsWith(decoratedPrevious)) {
-        title = title.slice(decoratedPrevious.length).replace(/^\s+/, "");
+        title = title.slice(decoratedPrevious.length).replace(new RegExp(`^${marker}?\\s*`), "");
       } else if (previous && title.startsWith(previous)) {
         // Migrate titles created before the visual marker was introduced.
         title = title.slice(previous.length).replace(/^\s+/, "");
       }
 
       const decoratedNext = next && `${marker}${next}`;
-      if (decoratedNext && !title.startsWith(decoratedNext)) {
+      if (decoratedNext && !title.startsWith(`${decoratedNext}${marker}`)) {
         // A matching undecorated prefix may be a title created by an older extension version.
-        title = title.startsWith(next) ? `${marker}${title}` : `${decoratedNext} ${title}`;
+        title = title.startsWith(decoratedNext) ? `${decoratedNext}${marker} ${title.slice(decoratedNext.length).trimStart()}` : title.startsWith(next) ? `${marker}${next}${marker} ${title.slice(next.length).trimStart()}` : `${decoratedNext}${marker} ${title}`;
       }
       if (title !== document.title) document.title = title;
     },
