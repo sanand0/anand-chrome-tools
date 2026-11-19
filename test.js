@@ -639,6 +639,49 @@ test("ChatGPT raw SSE keeps unknown events and omits split transport credentials
   assert.doesNotMatch(JSON.stringify(records), /NEVER-PERSIST-THIS|DO-NOT-COPY/);
   assert.equal(records.find((r) => r.kind === "diagnostic").omittedTransportEvents, 1);
   assert.equal(records[0].request.messages[0].content.content_type, "future");
+  assert.equal(records.at(-1).stream.doneSeen, true);
+  assert.equal(records.at(-1).stream.readerEnd, "eof");
+});
+
+test("ChatGPT stores generation evidence and distinguishes an abort after DONE from interruption", async () => {
+  const w = await workerHarness();
+  w.values.chatgptBackupEnabled = true;
+  const parentId = crypto.randomUUID();
+  const finalId = crypto.randomUUID();
+  const event = (data) => `data: ${JSON.stringify(data)}\r\n\r\n`;
+  const marker = (message_id, marker, conversation_id = w.id) => event({ type: "message_marker", conversation_id, message_id, marker });
+  const final = marker(finalId, "final_channel_token") + marker(finalId, "last_token");
+  const stop = event({ type: "message_stream_complete", conversation_id: w.id }) + "data: [DONE]\r\n\r\n";
+  for (const [prefix, doneSeen, messageStreamComplete, serverConversationId, finalMessageId] of [
+    [final + stop, true, true, w.id, finalId],
+    [final + "data: [DON", false, false, w.id, finalId],
+    [final + marker(crypto.randomUUID(), "last_token", crypto.randomUUID()) + stop, true, true, null, null],
+    [final + marker(parentId, "final_channel_token") + marker(parentId, "last_token") + stop, true, true, w.id, null],
+  ]) {
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(prefix));
+        setTimeout(() => controller.error(new DOMException("aborted", "AbortError")), 20);
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const hook = await captureHarness(() => Promise.resolve(response));
+    const page = await hook.context.fetch("/backend-api/f/conversation", {
+      method: "POST", body: JSON.stringify({ conversation_id: w.id, parent_message_id: parentId }),
+    });
+    await assert.rejects(page.text(), { name: "AbortError" });
+    const records = await hook.done();
+    const end = records.at(-1);
+    const stream = { serverConversationId, requestParentId: parentId, finalMessageId, doneSeen, messageStreamComplete, readerEnd: "aborted" };
+    assert.equal(end.complete, false);
+    assert.deepEqual(JSON.parse(JSON.stringify(end.stream)), stream);
+    assert.equal(records.filter((r) => r.kind === "chunk").map((r) => r.text).join(""), prefix);
+    for (const record of records) await w.api.receiveChatgptCapture(record, { tab: { id: 1 } });
+    await w.api.serialBackup(() => w.api.flushChatgptCaptures());
+    const raw = w.root.dirs.get("chatgpt-raw");
+    const dir = raw.dirs.get("events").dirs.get(`1-${end.captureId}`);
+    assert.deepEqual(JSON.parse(dir.files.get(`${String(end.index).padStart(5, "0")}.json`)).stream, stream);
+    assert.equal(raw.files.has(`${w.id}.json`), false);
+  }
 });
 
 test("ChatGPT hook excludes unrelated/auth traffic, shared pages and temporary requests; stop restores fetch", async () => {
@@ -1074,21 +1117,29 @@ test("ChatGPT adopts a finished turn and a filled final image without accepting 
   assert.equal(chatgptPromotion(prior, { ...next, messages: { a: image } }), "promote");
 });
 
-test("ChatGPT list keeps only UUIDs and latest update times through the disk queue", async () => {
+test("ChatGPT catalog keeps observed titles and merges numeric timestamps through the disk queue", async () => {
   const h = await workerHarness();
   h.values.chatgptBackupEnabled = true;
-  for (const seconds of [5, 1]) {
-    const page = { items: [{ id: h.id, update_time: new Date(seconds * 1000).toISOString(), title: "private title", future: "private data" },
-      { id: crypto.randomUUID(), update_time: new Date().toISOString(), is_temporary_chat: true }] };
+  const raw = await h.root.getDirectoryHandle("chatgpt-raw", { create: true });
+  const untouched = crypto.randomUUID();
+  raw.files.set("catalog.json", JSON.stringify({ [h.id]: 5, [untouched]: 2 }));
+  for (const [seconds, title, expected] of [
+    [4, "stale legacy title", 5],
+    [5, "first title", { updateTime: 5, title: "first title" }],
+    [6, "renamed title", { updateTime: 6, title: "renamed title" }],
+    [5, "stale title", { updateTime: 6, title: "renamed title" }],
+    [7, undefined, { updateTime: 7, title: "renamed title" }],
+  ]) {
+    const page = { items: [{ id: h.id, update_time: new Date(seconds * 1000).toISOString(), ...(title !== undefined && { title }), future: "private data" },
+      { id: crypto.randomUUID(), update_time: new Date().toISOString(), title: "temporary title", is_temporary_chat: true }] };
     const response = new Response(JSON.stringify(page), { headers: { "content-type": "application/json" } });
     const hook = await captureHarness(() => Promise.resolve(response));
     assert.deepEqual(await (await hook.context.fetch("/backend-api/conversations?offset=0")).json(), page);
     const records = await hook.done();
-    assert.doesNotMatch(JSON.stringify(records), /private title|private data/);
+    assert.deepEqual(JSON.parse(records.find((record) => record.kind === "chunk").text), [{ id: h.id, updateTime: seconds, title: title ?? null }]);
     for (const r of records) await h.api.receiveChatgptCapture(r, { tab: { id: 1 } });
     await h.api.serialBackup(() => h.api.flushChatgptCaptures());
+    assert.deepEqual(JSON.parse(raw.files.get("catalog.json")), { [h.id]: expected, [untouched]: 2 });
   }
-  const raw = h.root.dirs.get("chatgpt-raw");
-  assert.deepEqual(JSON.parse(raw.files.get("catalog.json")), { [h.id]: 5 });
   assert.equal(raw.dirs.has("events"), false);
 });

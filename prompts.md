@@ -1,5 +1,28 @@
 # Prompts
 
+## Improve ChatGPT capture, 19 Nov 2026
+
+<!--
+cd ~/code/anand-chrome-tools
+codex --model gpt-6.2-sol --config model_reasoning_effort=high
+-->
+
+Diagnose why some ChatGPT chats appear in chatgpt-raw/catalog.json without a saved snapshot. Reopening 6afe4f2d-9980-83ec-b87b-7946f38d689a in a fresh tab produced a valid snapshot. In the same authenticated browser, use disposable chats to compare initial generation and follow-ups in a fresh tab and a long-lived tab, then reopen a missed chat. For each case, trace what ChatGPT sends, what the observer sees, what reaches the queue, and what gets saved. Report the first stage where data is missing and the smallest fix the evidence supports. Keep capture passive. Also retain titles from observed list responses in {updateTime, title} catalog entries and support existing numeric entries.
+
+---
+
+I reloaded the extension.
+
+Improve passive ChatGPT backups so `~/code/scripts/chatcli backup` can use the finalized active branch even when ChatGPT sends a follow-up as a stream and never fetches a fresh conversation snapshot. Use the findings from Codex session 01a1f34e-f870-72c1-884e-1d4ed559fcd4.
+
+First, use disposable chats in the authenticated browser to check whether ChatGPT exposes the finalized branch in browser state after generation. Test a new chat, a follow-up, and an edit or regeneration. Compare the captured message IDs and visible content with the UI and a native snapshot obtained by reopening the chat.
+
+If there’s a reliable source, capture the finalized branch passively and reuse the existing snapshot validation and versioning. Preserve raw stream records. Record the server conversation ID, request parent ID, final message ID, whether [DONE] was seen, and how the reader ended. A reader abort after [DONE] must remain distinguishable from an interrupted generation.
+
+Keep capture opt-in and make no extra ChatGPT requests during ordinary browsing. If the finalized branch is unavailable or ambiguous, retain the stream evidence and report the gap. Verify what reaches disk and what chatcli backup --dry-run --verbose can use.
+
+<!-- codex resume 01a1f34e-f870-72c1-884e-1d4ed559fcd4 -->
+
 ## Clean up the last commit, 18 Nov 2026
 
 <!--

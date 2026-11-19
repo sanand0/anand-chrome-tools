@@ -8,6 +8,9 @@
   const CHANNEL = `anand-${SITE}-backup-v1`;
   const MAX_BYTES = 32 * 1024 * 1024;
   const CHUNK = 128 * 1024;
+  const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const GENERATION_PATH = /^\/backend-api\/(?:f\/)?conversation$/;
+  const isUUID = (value) => typeof value === "string" && UUID.test(value);
   const original = globalThis.fetch;
   let enabled = true;
   let relayReady = false;
@@ -32,7 +35,7 @@
     const path = url.pathname;
     const catalog = SITE === "chatgpt" && path === "/backend-api/conversations";
     // Observe only allowed conversation data and a metadata-only list projection.
-    if (SITE === "chatgpt" && !catalog && !/^\/backend-api\/(?:f\/)?conversation$/.test(path) &&
+    if (SITE === "chatgpt" && !catalog && !GENERATION_PATH.test(path) &&
       !/^\/backend-api\/conversations?\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:\/[a-z_-]+)?$/i.test(path)) return null;
     if (SITE === "claude" && !/^\/api\/organizations\/[0-9a-f-]{36}\/chat_conversations\/[0-9a-f-]{36}(?:\/[a-z_-]+)?$/i.test(path) &&
       !/^\/claudeai-rpc\/anthropic\.bard\.api\.v1alpha\.ConversationService\/(?:StreamTimeline|PerformAction)$/.test(path)) return null;
@@ -65,7 +68,45 @@
     return emit;
   }
 
-  async function observe(response, catalog, emit) {
+  function generationEvidence({ request }) {
+    const parent = request?.parent_message_id;
+    const requestParentId = parent === "client-created-root" || isUUID(parent) ? parent : null;
+    const ids = new Set();
+    const finalMarkers = new Set();
+    const lastMarkers = new Set();
+    let doneSeen = false;
+    let messageStreamComplete = false;
+    return {
+      record(block) {
+        if (!block.includes("[DONE]") && !block.includes('"conversation_id"')) return;
+        const data = block.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).replace(/^ /, "")).join("\n");
+        if (data.trim() === "[DONE]") {
+          doneSeen = true;
+          return;
+        }
+        let value;
+        try { value = JSON.parse(data); } catch { return; }
+        const id = value?.conversation_id ?? value?.v?.conversation_id;
+        if (!isUUID(id)) return;
+        ids.add(id);
+        if (value.type === "message_stream_complete") messageStreamComplete = true;
+        if (value.type === "message_marker" && isUUID(value.message_id)) {
+          if (value.marker === "final_channel_token") finalMarkers.add(value.message_id);
+          if (value.marker === "last_token") lastMarkers.add(value.message_id);
+        }
+      },
+      summary(readerEnd) {
+        // Multiple answers can share a stream. Only attribute an unambiguous final marker.
+        const finals = [...finalMarkers].filter((id) => lastMarkers.has(id));
+        const serverConversationId = ids.size === 1 ? ids.values().next().value : null;
+        const finalMessageId = serverConversationId && finals.length === 1 ? finals[0] : null;
+        return { serverConversationId, requestParentId, finalMessageId, doneSeen, messageStreamComplete, readerEnd };
+      },
+    };
+  }
+
+  async function observe(response, catalog, emit, generation) {
     let reader;
     let buffer = "";
     let timer;
@@ -93,12 +134,15 @@
       }
       if (buffer && !timer) timer = setTimeout(flush, 1000);
     };
-    const end = (complete, reason = "") => emit({ kind: "end", complete, reason, bytesRead: bytes, finishedAt: Date.now() });
+    const end = (complete, reason = "", readerEnd = complete ? "eof" : "error") => emit({
+      kind: "end", complete, reason, bytesRead: bytes, finishedAt: Date.now(),
+      ...(generation && { stream: generation.summary(readerEnd) }),
+    });
     try {
       if (catalog && !response.ok) return end(false, `HTTP ${response.status}`);
       if (!response.body) {
         emit({ kind: "headers", status: response.status, contentType: response.headers.get("content-type") || "" });
-        end(false, `HTTP ${response.status} or empty body`);
+        end(false, `HTTP ${response.status} or empty body`, "no-body");
         return;
       }
       const clone = response.clone();
@@ -117,8 +161,8 @@
             if (!Array.isArray(items)) throw new Error("Invalid conversation list");
             append(JSON.stringify(items.flatMap((item) => {
               const updateTime = Date.parse(item?.update_time) / 1000;
-              return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(item?.id) && Number.isFinite(updateTime) &&
-                !item.is_temporary_chat ? [{ id: item.id, updateTime }] : [];
+              return isUUID(item?.id) && Number.isFinite(updateTime) &&
+                !item.is_temporary_chat ? [{ id: item.id, updateTime, title: typeof item.title === "string" ? item.title : null }] : [];
             })));
           }
           return;
@@ -132,13 +176,19 @@
           const separator = match[0];
           eventBuffer = eventBuffer.slice(match.index + separator.length);
           if (transport(block)) omitted();
-          else append(block + separator);
+          else {
+            generation?.record(block);
+            append(block + separator);
+          }
         }
         if (eventBuffer.length > 1024 * 1024) throw new Error("SSE record exceeded 1 MiB safety limit");
         if (final && eventBuffer) {
           // An incomplete SSE record may contain a credential; retain only when identifiable.
           if (transport(eventBuffer) || /"token"\s*:/.test(eventBuffer)) omitted();
-          else append(eventBuffer);
+          else {
+            if (/^data: ?\[DONE\](?:\r?\n)?$/.test(eventBuffer)) generation?.record(eventBuffer);
+            append(eventBuffer);
+          }
           eventBuffer = "";
         }
       };
@@ -154,7 +204,7 @@
         bytes += value.byteLength;
         if (bytes > (catalog ? 1024 * 1024 : MAX_BYTES)) {
           flush();
-          end(false, catalog ? "Conversation list exceeded 1 MiB capture limit" : "Response exceeded 32 MiB capture limit");
+          end(false, catalog ? "Conversation list exceeded 1 MiB capture limit" : "Response exceeded 32 MiB capture limit", "limit");
           void reader.cancel().catch(() => {});
           return;
         }
@@ -172,11 +222,15 @@
     } catch (error) {
       if (eventBuffer) {
         if (transport(eventBuffer) || /"token"\s*:/.test(eventBuffer)) omitted();
-        else if (eventBuffer.length <= 1024 * 1024) append(eventBuffer);
+        else if (eventBuffer.length <= 1024 * 1024) {
+          if (/^data: ?\[DONE\](?:\r?\n)?$/.test(eventBuffer)) generation?.record(eventBuffer);
+          append(eventBuffer);
+        }
         emit({ kind: "diagnostic", incompleteSseCharacters: eventBuffer.length });
       }
       flush();
-      if (enabled) end(false, error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "Response interrupted or unreadable");
+      if (enabled) end(false, error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : "Response interrupted or unreadable",
+        error?.name === "AbortError" ? "aborted" : "error");
     } finally {
       clearTimeout(timer);
       if (reader) {
@@ -194,9 +248,12 @@
     if (info) {
       try {
         const emit = begin(info);
+        const generation = SITE === "chatgpt" && info.method === "POST" && GENERATION_PATH.test(info.path) ? generationEvidence(info) : null;
         void result.then(
-          (response) => { if (enabled) void observe(response, info.catalog, emit); },
-          () => emit({ kind: "end", complete: false, reason: "Request rejected", finishedAt: Date.now() }),
+          (response) => { if (enabled) void observe(response, info.catalog, emit, generation); },
+          () => emit({ kind: "end", complete: false, reason: "Request rejected", finishedAt: Date.now(),
+            ...(generation && { stream: generation.summary("request-rejected") }),
+          }),
         ).catch(() => {});
       } catch { /* Capture failures never escape into the page. */ }
     }

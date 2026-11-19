@@ -856,11 +856,14 @@ async function flushChatgptCaptures(includeUnfinished = false, site = "chatgpt")
         const catalog = previous ? JSON.parse(previous) : {};
         let changed = false;
         for (const entry of Array.isArray(entries) ? entries : []) {
-          const { id, updateTime } = entry || {};
-          if (UUID.test(id) && Number.isFinite(updateTime) && updateTime > (catalog[id] ?? 0)) {
-            catalog[id] = updateTime;
-            changed = true;
-          }
+          const { id, updateTime, title } = entry || {};
+          if (!UUID.test(id) || !Number.isFinite(updateTime)) continue;
+          const old = catalog[id];
+          const oldTime = typeof old === "number" ? old : old?.updateTime ?? -Infinity;
+          const nextTitle = typeof title === "string" ? title : old?.title ?? null;
+          if (updateTime < oldTime || (updateTime === old?.updateTime && nextTitle === old.title)) continue;
+          catalog[id] = { updateTime, title: nextTitle };
+          changed = true;
         }
         if (changed) await writeText(root, "catalog.json", JSON.stringify(catalog));
       }
