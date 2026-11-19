@@ -570,6 +570,8 @@ test("ChatGPT snapshot classification distinguishes trees, branches and partial 
   assert.equal(chatgptSnapshot({ ...tree, mapping: { ...tree.mapping, a: { ...tree.mapping.a, children: ["missing"] } } }, id).coverage, "partial");
   const branch = { conversation_id: id, messages: [{ id: "a", status: "finished_successfully", content: { content_type: "future", nested: [1] } }], current_node: "a", page_info: { has_previous_page: false, has_next_page: false } };
   assert.equal(chatgptSnapshot(branch, id).coverage, "branch");
+  const placeholder = { id: "a", author: { role: "tool" }, channel: "final", content: { content_type: "multimodal_text", parts: [] } };
+  assert.equal(chatgptSnapshot({ ...branch, messages: [placeholder] }, id).coverage, "partial");
   assert.equal(chatgptSnapshot({ ...branch, page_info: { has_previous_page: true, has_next_page: false } }, id).coverage, "partial");
   assert.equal(chatgptSnapshot({ ...branch, messages: [{ id: "a", status: "in_progress" }] }, id).coverage, "partial");
   assert.equal(chatgptSnapshot(branch, "87654321-1234-1234-1234-123456789abc"), null);
@@ -643,7 +645,7 @@ test("ChatGPT hook excludes unrelated/auth traffic, shared pages and temporary r
   const original = () => Promise.resolve(new Response("{}"));
   const h = await captureHarness(original);
   await h.context.fetch("/api/auth/session");
-  await h.context.fetch("/backend-api/conversations");
+  await h.context.fetch("/backend-api/conversations", { method: "POST" });
   await h.context.fetch("https://example.org/backend-api/f/conversation");
   await h.context.fetch("/backend-api/f/conversation", { method: "POST", body: '{"history_and_training_disabled":true}' });
   assert.equal(h.records.length, 0);
@@ -1052,4 +1054,41 @@ test("Claude diagnostic identity follows the response path across an in-tab navi
   await h.api.serialBackup(async () => {});
   assert.ok(h.values[`claude-state:${org}:${other}`].provisional);
   assert.ok(!h.values[`claude-state:${org}:${h.id}`]);
+});
+
+test("ChatGPT adopts a finished turn and a filled final image without accepting unrelated edits", () => {
+  const { chatgptPromotion } = globalThis.AnandPaletteCore;
+  const message = { author: { role: "assistant" }, status: "in_progress", create_time: 10,
+    metadata: { parent_id: "prompt" }, content: { content_type: "thoughts", thoughts: [] } };
+  const prior = { coverage: "partial", finishedAt: 20, updateTime: 1, messages: { a: message } };
+  const final = { ...message, status: "finished_successfully", content: { content_type: "text", parts: ["done"] } };
+  const next = { coverage: "branch", startedAt: 30, updateTime: 2, messages: { a: final } };
+  assert.equal(chatgptPromotion(prior, next), "promote");
+  assert.equal(chatgptPromotion(prior, { ...next, messages: { a: { ...final, metadata: { parent_id: "edit" } } } }), "changed-message-content");
+  assert.equal(chatgptPromotion({ ...prior, messages: { a: final } }, { ...next, messages: { a: message } }), "changed-message-content");
+  const placeholder = { ...final, author: { role: "tool" }, channel: "final",
+    content: { content_type: "multimodal_text", parts: [] } };
+  const image = { ...placeholder, content: { ...placeholder.content,
+    parts: [{ content_type: "image_asset_pointer", asset_pointer: "file-service://asset" }] } };
+  assert.equal(chatgptPromotion({ ...prior, messages: { a: placeholder } }, { ...next, messages: { a: image } }), "promote");
+  assert.equal(chatgptPromotion(prior, { ...next, messages: { a: image } }), "promote");
+});
+
+test("ChatGPT list keeps only UUIDs and latest update times through the disk queue", async () => {
+  const h = await workerHarness();
+  h.values.chatgptBackupEnabled = true;
+  for (const seconds of [5, 1]) {
+    const page = { items: [{ id: h.id, update_time: new Date(seconds * 1000).toISOString(), title: "private title", future: "private data" },
+      { id: crypto.randomUUID(), update_time: new Date().toISOString(), is_temporary_chat: true }] };
+    const response = new Response(JSON.stringify(page), { headers: { "content-type": "application/json" } });
+    const hook = await captureHarness(() => Promise.resolve(response));
+    assert.deepEqual(await (await hook.context.fetch("/backend-api/conversations?offset=0")).json(), page);
+    const records = await hook.done();
+    assert.doesNotMatch(JSON.stringify(records), /private title|private data/);
+    for (const r of records) await h.api.receiveChatgptCapture(r, { tab: { id: 1 } });
+    await h.api.serialBackup(() => h.api.flushChatgptCaptures());
+  }
+  const raw = h.root.dirs.get("chatgpt-raw");
+  assert.deepEqual(JSON.parse(raw.files.get("catalog.json")), { [h.id]: 5 });
+  assert.equal(raw.dirs.has("events"), false);
 });

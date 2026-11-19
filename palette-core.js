@@ -364,8 +364,30 @@
         Object.hasOwn(messages, value.current_node) && value.page_info?.has_previous_page === false &&
         value.page_info?.has_next_page === false) coverage = "branch";
     } else return null;
-    if (messages[value.current_node]?.status === "in_progress") coverage = "partial";
+    if (messages[value.current_node]?.status === "in_progress" ||
+        Object.values(messages).some(chatgptEmptyImage)) coverage = "partial";
     return { id, coverage, messages, updateTime: typeof value.update_time === "number" && Number.isFinite(value.update_time) ? value.update_time : null };
+  }
+
+  function chatgptEmptyImage(message) {
+    return message.author?.role === "tool" && message.channel === "final" &&
+      message.content?.content_type === "multimodal_text" &&
+      Array.isArray(message.content.parts) && message.content.parts.length === 0;
+  }
+
+  function chatgptSettled(before, after) {
+    const role = before.author?.role;
+    if (after.status !== "finished_successfully" || !["assistant", "tool"].includes(role) ||
+        !Number.isFinite(before.create_time) || before.create_time !== after.create_time ||
+        before.metadata?.parent_id !== after.metadata?.parent_id) return false;
+    const image = after.author?.role === "tool" && after.channel === "final" &&
+      after.content.content_type === "multimodal_text" &&
+      after.content.parts?.some((part) => part?.content_type === "image_asset_pointer" && part.asset_pointer);
+    // ChatGPT can reuse the in-progress thinking ID for the finished image tool reply.
+    if (before.status === "in_progress") {
+      return role === after.author?.role || (role === "assistant" && before.content.content_type === "thoughts" && image);
+    }
+    return image && chatgptEmptyImage(before);
   }
 
   // Missing/changed content can mean deletion, a branch switch, a page or a stale server.
@@ -379,7 +401,8 @@
     if (next.updateTime !== null && previous.updateTime !== null && next.updateTime < previous.updateTime) return "older-server-time";
     for (const [id, message] of Object.entries(previous.messages)) {
       if (!Object.hasOwn(next.messages, id)) return "missing-messages";
-      if (chatgptJSON(message.content) !== chatgptJSON(next.messages[id].content)) return "changed-message-content";
+      if (chatgptJSON(message.content) !== chatgptJSON(next.messages[id].content) &&
+          (next.coverage === "partial" || !chatgptSettled(message, next.messages[id]))) return "changed-message-content";
       for (const key of ["attachments", "files", "files_v2", "sync_sources"]) {
         if (Object.hasOwn(message, key) && chatgptJSON(message[key]) !== chatgptJSON(next.messages[id][key])) return `changed-message-${key}`;
       }

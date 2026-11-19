@@ -30,13 +30,14 @@
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url, location.href);
     if (url.origin !== location.origin) return null;
     const path = url.pathname;
-    // Do not observe auth, headers, lists, prepare/init, telemetry, files or signed URLs.
-    if (SITE === "chatgpt" && !/^\/backend-api\/(?:f\/)?conversation$/.test(path) &&
+    const catalog = SITE === "chatgpt" && path === "/backend-api/conversations";
+    // Observe only allowed conversation data and a metadata-only list projection.
+    if (SITE === "chatgpt" && !catalog && !/^\/backend-api\/(?:f\/)?conversation$/.test(path) &&
       !/^\/backend-api\/conversations?\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:\/[a-z_-]+)?$/i.test(path)) return null;
     if (SITE === "claude" && !/^\/api\/organizations\/[0-9a-f-]{36}\/chat_conversations\/[0-9a-f-]{36}(?:\/[a-z_-]+)?$/i.test(path) &&
       !/^\/claudeai-rpc\/anthropic\.bard\.api\.v1alpha\.ConversationService\/(?:StreamTimeline|PerformAction)$/.test(path)) return null;
     const method = String(init?.method ?? input?.method ?? "GET").toUpperCase();
-    if (!['GET', 'POST', 'PATCH', 'DELETE', 'PUT'].includes(method)) return null;
+    if (!['GET', 'POST', 'PATCH', 'DELETE', 'PUT'].includes(method) || (catalog && method !== "GET")) return null;
     let request = null;
     let requestBodyUnavailable = false;
     if (method !== "GET") {
@@ -52,7 +53,7 @@
       } else requestBodyUnavailable = body != null || input instanceof Request;
     }
     const query = Object.fromEntries([...url.searchParams].filter(([key]) => ["cursor", "before", "after", "limit", "offset", "current_node", "message_id", "num_turns", "include_has_versions", "tree", "rendering_mode", "render_all_tools"].includes(key)));
-    return { path, query, queryKeys: [...url.searchParams.keys()], method, request, requestBodyUnavailable, pageConversationId: conversationId(), ...(SITE === "claude" ? { organizationId } : {}) };
+    return { path, ...(catalog && { catalog }), query, queryKeys: [...url.searchParams.keys()], method, request, requestBodyUnavailable, pageConversationId: conversationId(), ...(SITE === "claude" ? { organizationId } : {}) };
   }
 
   function begin(info) {
@@ -64,12 +65,13 @@
     return emit;
   }
 
-  async function observe(response, captureId, emit) {
+  async function observe(response, catalog, emit) {
     let reader;
     let buffer = "";
     let timer;
     let bytes = 0;
     let eventBuffer = "";
+    let catalogBody = "";
     let omittedTransportEvents = 0;
     const transport = (text) => /"type"\s*:\s*"resume_conversation_token"|"(?:access_token|refresh_token)"\s*:/.test(text);
     const omitted = () => emit({ kind: "diagnostic", omittedTransportEvents: ++omittedTransportEvents });
@@ -93,6 +95,7 @@
     };
     const end = (complete, reason = "") => emit({ kind: "end", complete, reason, bytesRead: bytes, finishedAt: Date.now() });
     try {
+      if (catalog && !response.ok) return end(false, `HTTP ${response.status}`);
       if (!response.body) {
         emit({ kind: "headers", status: response.status, contentType: response.headers.get("content-type") || "" });
         end(false, `HTTP ${response.status} or empty body`);
@@ -107,6 +110,19 @@
       const decoder = new TextDecoder();
       const sse = contentType.includes("text/event-stream");
       const consume = (text, final = false) => {
+        if (catalog) {
+          catalogBody += text;
+          if (final) {
+            const { items } = JSON.parse(catalogBody);
+            if (!Array.isArray(items)) throw new Error("Invalid conversation list");
+            append(JSON.stringify(items.flatMap((item) => {
+              const updateTime = Date.parse(item?.update_time) / 1000;
+              return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(item?.id) && Number.isFinite(updateTime) &&
+                !item.is_temporary_chat ? [{ id: item.id, updateTime }] : [];
+            })));
+          }
+          return;
+        }
         if (!sse) return append(text);
         eventBuffer += text;
         // Buffer whole SSE records so credentials split across network chunks never escape.
@@ -136,9 +152,9 @@
           return;
         }
         bytes += value.byteLength;
-        if (bytes > MAX_BYTES) {
+        if (bytes > (catalog ? 1024 * 1024 : MAX_BYTES)) {
           flush();
-          end(false, "Response exceeded 32 MiB capture limit");
+          end(false, catalog ? "Conversation list exceeded 1 MiB capture limit" : "Response exceeded 32 MiB capture limit");
           void reader.cancel().catch(() => {});
           return;
         }
@@ -179,7 +195,7 @@
       try {
         const emit = begin(info);
         void result.then(
-          (response) => { if (enabled) void observe(response, null, emit); },
+          (response) => { if (enabled) void observe(response, info.catalog, emit); },
           () => emit({ kind: "end", complete: false, reason: "Request rejected", finishedAt: Date.now() }),
         ).catch(() => {});
       } catch { /* Capture failures never escape into the page. */ }

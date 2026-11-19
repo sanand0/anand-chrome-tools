@@ -774,9 +774,13 @@ async function configureChatgptCapture(site = "chatgpt") {
   if (scripts.length) await chrome.scripting.registerContentScripts(scripts);
 }
 
+function isChatgptCatalog(record, site) {
+  return site === "chatgpt" && record.method === "GET" && record.path === "/backend-api/conversations";
+}
+
 function isSnapshotRequest(record, site = "chatgpt") {
   if (site === "claude") return record.method === "CACHE" || (record.method === "GET" && /\/chat_conversations\/[0-9a-f-]{36}$/i.test(record.path));
-  return record.method === "GET" && /^\/backend-api\/conversations?\/[0-9a-f-]{36}(?:\/messages)?$/i.test(record.path);
+  return isChatgptCatalog(record, site) || record.method === "GET" && /^\/backend-api\/conversations?\/[0-9a-f-]{36}(?:\/messages)?$/i.test(record.path);
 }
 
 async function receiveChatgptCapture(record, sender, site = "chatgpt") {
@@ -843,6 +847,26 @@ async function flushChatgptCaptures(includeUnfinished = false, site = "chatgpt")
     const contiguous = records[0].index === 0 && records.every((r, index) => r.index === index);
     if (isSnapshotRequest(first, site) && !end && !includeUnfinished) continue;
     if (isSnapshotRequest(first, site) && !contiguous && !includeUnfinished) continue;
+    if (isChatgptCatalog(first, site)) {
+      if (end?.complete && contiguous && records.some((r) => r.kind === "headers" && r.status === 200)) {
+        let entries;
+        try { entries = JSON.parse(records.filter((r) => r.kind === "chunk").map((r) => r.text).join("")); }
+        catch { entries = []; }
+        const previous = await readText(root, "catalog.json");
+        const catalog = previous ? JSON.parse(previous) : {};
+        let changed = false;
+        for (const entry of Array.isArray(entries) ? entries : []) {
+          const { id, updateTime } = entry || {};
+          if (UUID.test(id) && Number.isFinite(updateTime) && updateTime > (catalog[id] ?? 0)) {
+            catalog[id] = updateTime;
+            changed = true;
+          }
+        }
+        if (changed) await writeText(root, "catalog.json", JSON.stringify(catalog));
+      }
+      await chrome.storage.local.remove(group);
+      continue;
+    }
     let snapshot = false;
     let snapshotIssue = "";
     if (isSnapshotRequest(first, site) && end?.complete && contiguous && records.some((r) => r.kind === "headers" && r.status === 200)) {

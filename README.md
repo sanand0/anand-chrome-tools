@@ -63,6 +63,7 @@ The extension can save structured ChatGPT and Claude conversations to your local
 | File in the data folder | Contents |
 | --- | --- |
 | `chatgpt-raw/<id>.json` or `claude-raw/<org>/<id>.json` | Latest accepted native JSON for that conversation. The first available snapshot may be provisional. |
+| `chatgpt-raw/catalog.json` | Conversation UUIDs and latest server update timestamps from list responses already fetched by ChatGPT. Useful for spotting gaps in the portion of the account that the browser has observed. |
 | `<id>.backup.json` alongside the snapshot | Coverage (`tree`, `branch`, or `partial`), hash, and source and capture timing. Check coverage before treating a snapshot as complete. |
 | `versions/<id>/<sha256>.json` beneath the same site or organization folder | Every distinct observed native snapshot or page, including candidates held for review. |
 | `observations/<tab>-<capture>.json` beneath the same site or organization folder | Snapshot provenance and the decision to accept or hold it. |
@@ -74,7 +75,7 @@ The raw folders are separate from the existing rendered ChatGPT archives and off
 ### Recovery and coverage
 
 - If the folder is unavailable, pending fragments stay in this browser profile. Reconnect the folder and choose **Save pending backups** to retry. Unfinished responses are saved as provisional events. Turn capture off in Settings to stop observing while retaining files and pending data.
-- Older or conflicting snapshots are retained separately. Under **Review retained snapshots**, inspect the candidate file before choosing **Use reviewed candidate**. If Settings reports an integrity error, turn capture off, move the affected JSON and its matching metadata together to a recovery location, and inspect the retained versions before re-enabling capture and reopening the conversation.
+- Finished snapshots can supersede matching in-progress assistant or tool messages. Older or conflicting snapshots are retained separately. Under **Review retained snapshots**, inspect the candidate file before choosing **Use reviewed candidate**. If Settings reports an integrity error, turn capture off, move the affected JSON and its matching metadata together to a recovery location, and inspect the retained versions before re-enabling capture and reopening the conversation.
 - Coverage follows what the app loads while you browse. A snapshot can contain a complete active branch, a tree, or a partial page. Separate pages and raw events are preserved without reconstructing a tree. Unopened conversations, alternative replies, and background updates may be missing.
 - ChatGPT observes conversation fetch responses and skips public share pages and recognized temporary chats. Claude also observes the conversation cache and retains binary conversation RPC responses. Capture excludes credential sources and can miss traffic if either app changes its routes, transport, or cache schema.
 - Attachments, artifacts, and tool results are retained as they appear in the observed data. Referenced binaries and separate project or artifact APIs are outside coverage. Each response is capped at 32 MiB, with a 1 MiB limit per SSE record. Interrupted or limited captures stay provisional.
