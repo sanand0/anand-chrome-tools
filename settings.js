@@ -109,13 +109,12 @@ async function refreshBackup(permission, site) {
   const backupDetail = document.querySelector(`#${site}-detail`);
 
   const keys = (await chrome.storage.local.getKeys()).filter((key) => key.startsWith(`${site}-state:`));
-  const stateMap = await chrome.storage.local.get(keys);
-  const states = Object.values(stateMap);
+  const states = Object.values(await chrome.storage.local.get(keys));
   const names = [`${site}BackupEnabled`, `${site}LastObservedAt`, `${site}LastSavedAt`, `${site}BackupError`];
   const values = await chrome.storage.local.get(names);
   const [chatgptBackupEnabled, chatgptLastObservedAt, chatgptLastSavedAt, chatgptBackupError] = names.map((key) => values[key]);
   const pending = (await chrome.storage.local.getKeys()).filter((key) => key.startsWith(`${site}-pending:`)).length;
-  const review = states.filter((s) => s.needsReview).length;
+  const integrityErrors = states.filter((s) => s.integrityError).length;
   const provisional = states.filter((s) => s.provisional).length;
   backupEnable.checked = Boolean(chatgptBackupEnabled);
   const lines = [chatgptBackupEnabled ? "Capture is on." : "Capture is off.", `${states.length} observed conversations; ${pending} pending fragments.`];
@@ -124,40 +123,13 @@ async function refreshBackup(permission, site) {
   const nativeAt = Math.max(0, ...states.map((state) => state.lastAcceptedAt || 0));
   if (nativeAt) lines.push(`Latest accepted native JSON ${formatTime(nativeAt)}.`);
   if (chatgptBackupEnabled && chatgptLastObservedAt && (!nativeAt || chatgptLastObservedAt - nativeAt > 6 * 60 * 60 * 1000)) lines.push("Recent raw data has no recent accepted native snapshot. Reopen a conversation to refresh it.");
-  if (review) lines.push(`${review} conversation(s) need review; candidates are retained in versions/. See README for recovery.`);
-  if (provisional) lines.push(`${provisional} conversation(s) have provisional data; reopen them for a fresh snapshot.`);
+  if (integrityErrors) lines.push(`Backup integrity errors in ${integrityErrors} conversation(s). See README for recovery.`);
+  if (provisional) lines.push(`${provisional} conversation(s) have provisional data.`);
   if (chatgptBackupEnabled && (!chatgptLastObservedAt || Date.now() - chatgptLastObservedAt > 6 * 60 * 60 * 1000)) lines.push("No recent captures. Reload a conversation tab, browse a conversation, then check again.");
   if (permission !== "granted" && (chatgptBackupEnabled || pending)) lines.push("Connect or reconnect the data folder; pending data stays in this browser.");
   if (chatgptBackupError) lines.push(`Attention: ${chatgptBackupError.message}${chatgptBackupError.requiresReload ? " Reload the affected conversation tab." : ""}`);
   backupDetail.textContent = lines.join(" ");
-  backupDetail.classList.toggle("error", Boolean(review || chatgptBackupError));
-  const candidates = document.querySelector(`#${site}-candidates`);
-  candidates.replaceChildren();
-  document.querySelector(`#${site}-review`).hidden = !review;
-  for (const [key, state] of Object.entries(stateMap)) {
-    if (!state.needsReview) continue;
-    const item = document.createElement("li");
-    const label = document.createElement("p");
-    label.textContent = `${state.candidateTitle || key.slice(`${site}-state:`.length)} · ${state.needsReview}. Candidate: ${state.candidate}`;
-    item.append(label);
-    if (state.candidateMeta?.coverage !== "partial") {
-      const accept = document.createElement("button");
-      accept.type = "button";
-      accept.className = "secondary";
-      accept.textContent = "Use reviewed candidate";
-      accept.addEventListener("click", async () => {
-        accept.disabled = true;
-        try {
-          const response = await chrome.runtime.sendMessage({ type: `accept-${site}-candidate`, id: key.slice(`${site}-state:`.length), hash: state.candidateMeta.hash });
-          if (!response?.ok) throw new Error(response?.error || "Could not accept snapshot.");
-          setStatus("Reviewed snapshot selected. Previous versions retained.");
-        } catch (error) { setStatus(errorMessage(error), true); }
-        await refresh();
-      });
-      item.append(accept);
-    }
-    candidates.append(item);
-  }
+  backupDetail.classList.toggle("error", Boolean(integrityErrors || chatgptBackupError));
 }
 
 async function syncNow(requestPermission = false) {

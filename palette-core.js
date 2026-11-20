@@ -361,7 +361,7 @@
       for (const message of value.messages) if (message?.id) messages[message.id] = message;
       if (!messagePage && value.messages.length && Object.keys(messages).length === value.messages.length &&
         value.messages.every((m) => typeof m?.id === "string" && m.id && m.content && typeof m.content === "object") &&
-        Object.hasOwn(messages, value.current_node) && value.page_info?.has_previous_page === false &&
+        value.messages.at(-1).id === value.current_node && value.page_info?.has_previous_page === false &&
         value.page_info?.has_next_page === false) coverage = "branch";
     } else return null;
     if (messages[value.current_node]?.status === "in_progress" ||
@@ -391,7 +391,7 @@
   }
 
   // Missing/changed content can mean deletion, a branch switch, a page or a stale server.
-  // Keep the candidate and require review instead of guessing or unioning mutable documents.
+  // A newer complete server version may edit or replace a branch. Retain both native versions.
   function chatgptPromotion(previous, next) {
     if (!previous) return next.coverage === "partial" ? "promote-provisional" : "promote";
     if (next.coverage === "partial" && previous.coverage !== "partial") return "partial";
@@ -399,6 +399,8 @@
     if (next.startedAt <= previous.finishedAt) return "overlapping-or-delayed";
     if (typeof next.fetchedAt === "number" && typeof previous.fetchedAt === "number" && next.fetchedAt < previous.fetchedAt) return "older-cache-time";
     if (next.updateTime !== null && previous.updateTime !== null && next.updateTime < previous.updateTime) return "older-server-time";
+  if (next.coverage !== "partial" && Number.isFinite(previous.updateTime) && Number.isFinite(next.updateTime) &&
+      next.updateTime > previous.updateTime) return "promote";
     for (const [id, message] of Object.entries(previous.messages)) {
       if (!Object.hasOwn(next.messages, id)) return "missing-messages";
       if (chatgptJSON(message.content) !== chatgptJSON(next.messages[id].content) &&

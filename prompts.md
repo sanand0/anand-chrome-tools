@@ -1,5 +1,29 @@
 # Prompts
 
+## Fix lingering 🟡 in ChatGPT capture, 20 Nov 2026
+
+<!--
+cd ~/code/anand-chrome-tools
+codex --model gpt-6.2-sol --config model_reasoning_effort=high
+-->
+
+I opened every ChatGPT chat that had a 🟡 on the browser and scrolled through it end to end. Yet, still, some 🟡 are reported by `~/code/scripts/chatcli backup`.
+Why, and how can we fix it?
+
+--- <!-- steering -->
+
+FYI, most of the 🟡 seem like long scrolling pages.
+
+--- <!-- steering -->
+
+You may make changes in anand-chrome-tools or in chatcli backup - whichever is more appropriate.
+
+---
+
+Remove the review retained snapshots feature. I don't want to review chats. I will be using the export / dump from ChatGPT to replace it later anyway. Same for Claude.
+
+<!-- codex resume 01a1f647-5372-7a60-81aa-37baea7a4eb7 -->
+
 ## Improve ChatGPT capture, 19 Nov 2026
 
 <!--

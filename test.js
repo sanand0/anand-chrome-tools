@@ -573,12 +573,13 @@ test("ChatGPT snapshot classification distinguishes trees, branches and partial 
   const placeholder = { id: "a", author: { role: "tool" }, channel: "final", content: { content_type: "multimodal_text", parts: [] } };
   assert.equal(chatgptSnapshot({ ...branch, messages: [placeholder] }, id).coverage, "partial");
   assert.equal(chatgptSnapshot({ ...branch, page_info: { has_previous_page: true, has_next_page: false } }, id).coverage, "partial");
+  assert.equal(chatgptSnapshot({ ...branch, messages: [...branch.messages, { ...branch.messages[0], id: "b" }] }, id).coverage, "partial");
   assert.equal(chatgptSnapshot({ ...branch, messages: [{ id: "a", status: "in_progress" }] }, id).coverage, "partial");
   assert.equal(chatgptSnapshot(branch, "87654321-1234-1234-1234-123456789abc"), null);
   assert.equal(chatgptSnapshot({ ...branch, is_temporary_chat: true }, id), null);
 });
 
-test("ChatGPT promotion holds delayed, conflicting, shrinking and lower coverage snapshots", () => {
+test("ChatGPT promotion accepts newer complete snapshots and holds delayed or ambiguous captures", () => {
   const { chatgptPromotion } = globalThis.AnandPaletteCore;
   const old = { coverage: "tree", startedAt: 10, finishedAt: 20, updateTime: 5, messages: { a: { content: { parts: ["long response"] } } } };
   const next = { ...old, startedAt: 30, finishedAt: 40, updateTime: 6 };
@@ -586,9 +587,13 @@ test("ChatGPT promotion holds delayed, conflicting, shrinking and lower coverage
   assert.equal(chatgptPromotion(old, next), "promote");
   assert.equal(chatgptPromotion(old, { ...next, startedAt: 15 }), "overlapping-or-delayed");
   assert.equal(chatgptPromotion(old, { ...next, updateTime: 4 }), "older-server-time");
-  assert.equal(chatgptPromotion(old, { ...next, messages: {} }), "missing-messages");
+  assert.equal(chatgptPromotion(old, { ...next, messages: {} }), "promote");
+  assert.equal(chatgptPromotion(old, { ...next, updateTime: 5, messages: {} }), "missing-messages");
   assert.equal(chatgptPromotion(old, { ...next, coverage: "branch" }), "lower-coverage");
-  assert.equal(chatgptPromotion(old, { ...next, messages: { a: { content: { parts: ["short"] } } } }), "changed-message-content");
+  const edited = { ...next, messages: { a: { content: { parts: ["short"] } } } };
+  assert.equal(chatgptPromotion(old, edited), "promote");
+  assert.equal(chatgptPromotion(old, { ...edited, updateTime: 5 }), "changed-message-content");
+  assert.equal(chatgptPromotion(old, { ...edited, updateTime: null }), "changed-message-content");
   assert.equal(chatgptPromotion(old, { ...next, coverage: "partial" }), "partial");
 });
 
@@ -761,14 +766,14 @@ async function workerHarness() {
   };
   const source = readFileSync(new URL("./service-worker.js", import.meta.url), "utf8").replace(/^import "\.\/palette-core.js";\n/m, "").replace(/import \{[\s\S]*?\} from "\.\/filesystem.js";\n/, "");
   const context = { chrome, crypto, TextEncoder, DOMException, console, AnandPaletteCore: globalThis.AnandPaletteCore, readText, writeText, getDataDirectory: async () => connected ? root : null, getDirectoryPermission: async () => "granted" };
-  const api = runInNewContext(`${source}\n;({saveChatgptSnapshot,flushChatgptCaptures,receiveChatgptCapture,serialBackup,acceptChatgptCandidate,injectBackupIntoOpenTabs})`, context);
+  const api = runInNewContext(`${source}\n;({saveChatgptSnapshot,flushChatgptCaptures,receiveChatgptCapture,serialBackup,injectBackupIntoOpenTabs})`, context);
   const id = "12345678-1234-1234-1234-123456789abc";
   const branch = { conversation_id: id, title: "Original", update_time: 1, messages: [{ id: "a", status: "finished_successfully", content: { content_type: "future", parts: ["original"], nested: { kept: true } } }], current_node: "a", page_info: { has_previous_page: false, has_next_page: false } };
-  const save = async (value, startedAt = 100, finishedAt = 200) => api.saveChatgptSnapshot(root, JSON.stringify(value), value, globalThis.AnandPaletteCore.chatgptSnapshot(value, id), { captureId: crypto.randomUUID(), tabId: 1, path: `/backend-api/conversations/${id}`, startedAt, finishedAt });
+  const save = async (value, startedAt = 100, finishedAt = 200) => api.saveChatgptSnapshot(root, JSON.stringify(value), globalThis.AnandPaletteCore.chatgptSnapshot(value, id), { captureId: crypto.randomUUID(), tabId: 1, path: `/backend-api/conversations/${id}`, startedAt, finishedAt });
   return { api, chrome, root, values, writes, branch, id, save, connect: (value) => { connected = value; }, fail: (name) => { failFilename = name; } };
 }
 
-test("ChatGPT disk versions deduplicate, retain exact native objects, and hold branch deletions/conflicts", async () => {
+test("ChatGPT disk versions deduplicate and retain exact native objects after a branch change", async () => {
   const h = await workerHarness();
   await h.save(h.branch);
   const native = h.root.files.get(`${h.id}.json`);
@@ -783,14 +788,18 @@ test("ChatGPT disk versions deduplicate, retain exact native objects, and hold b
   assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).title, "Renamed");
   assert.equal(history.files.size, 2);
   const deleted = { ...rename, messages: [{ ...rename.messages[0], id: "b" }], current_node: "b", update_time: 3 };
+  Object.assign(h.values[`chatgpt-state:${h.id}`], { needsReview: "missing-messages", candidateMeta: { coverage: "branch" } });
   await h.save(deleted, 700, 800);
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, "missing-messages");
-  assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).title, "Renamed");
+  assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).current_node, "b");
+  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, undefined);
+  assert.equal(h.values[`chatgpt-state:${h.id}`].candidateMeta, undefined);
+  assert.ok([...history.files.values()].includes(native));
   assert.equal(history.files.size, 3);
   // Server times alone cannot rescue a delayed response or a conflicting body.
   await h.save({ ...rename, title: "Delayed", update_time: 100 }, 550, 900);
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, "overlapping-or-delayed");
-  assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).title, "Renamed");
+  assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).current_node, "b");
+  const observations = [...h.root.dirs.get("observations").files.values()].map(JSON.parse);
+  assert.equal(observations.at(-1).decision, "overlapping-or-delayed");
 });
 
 test("ChatGPT recovers a native/meta commit gap and never overwrites corrupt current data", async () => {
@@ -802,11 +811,11 @@ test("ChatGPT recovers a native/meta commit gap and never overwrites corrupt cur
   assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).title, "Commit gap");
   h.fail(null);
   await h.save(rename, 300, 400);
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, null);
+  assert.equal(h.values[`chatgpt-state:${h.id}`].integrityError, null);
   h.root.files.set(`${h.id}.json`, "corrupted original");
   await h.save({ ...rename, title: "Candidate" }, 500, 600);
   assert.equal(h.root.files.get(`${h.id}.json`), "corrupted original");
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, "unreadable-current-or-metadata");
+  assert.equal(h.values[`chatgpt-state:${h.id}`].integrityError, "unreadable-current-or-metadata");
 });
 
 test("ChatGPT durable queue handles out-of-order fragments, concurrent tabs, unavailable directory and restart", async () => {
@@ -852,7 +861,7 @@ test("ChatGPT paginated responses retain native shape and request identity witho
   const info = globalThis.AnandPaletteCore.chatgptSnapshot(page, h.id, true);
   assert.equal(info.id, h.id);
   assert.equal(info.coverage, "partial");
-  await h.api.saveChatgptSnapshot(h.root, JSON.stringify(page), page, info, { path: `/backend-api/conversations/${h.id}/messages`, query: { before: "cursor" }, captureId: crypto.randomUUID(), startedAt: 100, finishedAt: 200 });
+  await h.api.saveChatgptSnapshot(h.root, JSON.stringify(page), info, { path: `/backend-api/conversations/${h.id}/messages`, query: { before: "cursor" }, captureId: crypto.randomUUID(), startedAt: 100, finishedAt: 200 });
   assert.deepEqual(JSON.parse(h.root.files.get(`${h.id}.json`)), page);
   assert.equal(h.values[`chatgpt-state:${h.id}`].provisional, true);
   assert.equal(JSON.parse(h.root.files.get(`${h.id}.backup.json`)).query.before, "cursor");
@@ -864,24 +873,11 @@ test("ChatGPT preserves distinct large numeric literals without parsed-number de
   for (const literal of ["9007199254740992", "9007199254740993"]) {
     const raw = JSON.stringify(h.branch).replace('"update_time":1', `"update_time":1,"future_integer":${literal}`);
     const value = JSON.parse(raw);
-    await h.api.saveChatgptSnapshot(h.root, raw, value, globalThis.AnandPaletteCore.chatgptSnapshot(value, h.id), { captureId: crypto.randomUUID(), startedAt: 100, finishedAt: 200 });
+    await h.api.saveChatgptSnapshot(h.root, raw, globalThis.AnandPaletteCore.chatgptSnapshot(value, h.id), { captureId: crypto.randomUUID(), startedAt: 100, finishedAt: 200 });
   }
   const history = h.root.dirs.get("versions").dirs.get(h.id);
   assert.equal(history.files.size, 2);
   assert.ok([...history.files.values()].some((raw) => raw.includes("9007199254740993")));
-});
-
-test("ChatGPT explicit local review adopts a valid alternative branch and keeps both versions", async () => {
-  const h = await workerHarness();
-  h.root.dirs.set("chatgpt-raw", h.root); // Direct-save tests use the raw directory as their root.
-  await h.save(h.branch);
-  await h.save({ ...h.branch, update_time: 2, current_node: "b", messages: [{ ...h.branch.messages[0], id: "b" }] }, 300, 400);
-  const state = h.values[`chatgpt-state:${h.id}`];
-  assert.equal(state.needsReview, "missing-messages");
-  await h.api.acceptChatgptCandidate(h.id, state.candidateMeta.hash);
-  assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).current_node, "b");
-  assert.equal(h.root.dirs.get("versions").dirs.get(h.id).files.size, 2);
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, null);
 });
 
 test("ChatGPT interrupted streams retain delivered complete events and HTTP errors stay provisional", async () => {
@@ -900,7 +896,7 @@ test("ChatGPT interrupted streams retain delivered complete events and HTTP erro
   assert.match(failed.filter((r) => r.kind === "chunk").map((r) => r.text).join(""), /diagnostic/);
 });
 
-test("ChatGPT interrupted SSE tails are kept and an older page cannot clear a real review issue", async () => {
+test("ChatGPT keeps interrupted SSE tails and partial pages without replacing the current snapshot", async () => {
   const prefix = 'event: delta\ndata: {"future":"unfinished';
   const response = new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(prefix)); setTimeout(() => c.error(new Error("interrupted tail")), 20); } }), { headers: { "content-type": "text/event-stream" } });
   const h = await captureHarness(() => Promise.resolve(response));
@@ -912,10 +908,9 @@ test("ChatGPT interrupted SSE tails are kept and an older page cannot clear a re
   const w = await workerHarness();
   await w.save(w.branch);
   await w.save({ ...w.branch, update_time: 2, current_node: "b", messages: [{ ...w.branch.messages[0], id: "b" }] }, 300, 400);
-  const candidate = w.values[`chatgpt-state:${w.id}`].candidate;
-  await w.save({ ...w.branch, page_info: { has_previous_page: true, has_next_page: false } }, 500, 600);
-  assert.equal(w.values[`chatgpt-state:${w.id}`].needsReview, "missing-messages");
-  assert.equal(w.values[`chatgpt-state:${w.id}`].candidate, candidate);
+  await w.save({ ...w.branch, update_time: 3, page_info: { has_previous_page: true, has_next_page: false } }, 500, 600);
+  assert.equal(JSON.parse(w.root.files.get(`${w.id}.json`)).current_node, "b");
+  assert.equal(w.values[`chatgpt-state:${w.id}`].provisional, true);
 });
 
 test("ChatGPT malformed incoming snapshots are diagnostic-only; branched conversation IDs stay separate", async () => {
@@ -937,7 +932,7 @@ test("ChatGPT malformed incoming snapshots are diagnostic-only; branched convers
   await h.save(h.branch);
   const otherId = "87654321-1234-1234-1234-123456789abc";
   const other = { ...h.branch, conversation_id: otherId, branched_from: h.id };
-  await h.api.saveChatgptSnapshot(h.root, JSON.stringify(other), other, globalThis.AnandPaletteCore.chatgptSnapshot(other, otherId), { captureId: crypto.randomUUID(), startedAt: 300, finishedAt: 400 });
+  await h.api.saveChatgptSnapshot(h.root, JSON.stringify(other), globalThis.AnandPaletteCore.chatgptSnapshot(other, otherId), { captureId: crypto.randomUUID(), startedAt: 300, finishedAt: 400 });
   assert.equal(JSON.parse(h.root.files.get(`${otherId}.json`)).branched_from, h.id);
   assert.equal(JSON.parse(h.root.files.get(`${h.id}.json`)).conversation_id, h.id);
 });
@@ -972,9 +967,9 @@ test("ChatGPT never overwrites the only good current copy when its retained vers
   const current = h.root.files.get(`${h.id}.json`);
   const hash = h.values[`chatgpt-state:${h.id}`].hash;
   h.root.dirs.get("versions").dirs.get(h.id).files.set(`${hash}.json`, "corrupt version");
-  await h.save({ ...h.branch, title: "New candidate", update_time: 2 }, 300, 400);
+  await h.save({ ...h.branch, title: "New snapshot", update_time: 2 }, 300, 400);
   assert.equal(h.root.files.get(`${h.id}.json`), current);
-  assert.equal(h.values[`chatgpt-state:${h.id}`].needsReview, "corrupt-previous-version");
+  assert.equal(h.values[`chatgpt-state:${h.id}`].integrityError, "corrupt-previous-version");
 });
 
 test("Claude native cache and exports retain tool content and identify partial branch coverage", () => {
@@ -1045,11 +1040,22 @@ test("Claude backups use organization scope, preserve binary events, and never t
   h.values.claudeBackupEnabled = true;
   const org = "aaaaaaaa-1234-1234-1234-123456789abc";
   const tree = { kind: "hub_transcript", conversationUuid: h.id, messages: [{ uuid: "m", content: [{ type: "future", nested: [1] }] }], treeSize: 1, historyWindow: { mode: "full" } };
-  const start = { path: `/local/claude-conversation-store/trees/${org}/${h.id}`, method: "CACHE", cache: { fetchedAt: 10 }, startedAt: 100, captureId: crypto.randomUUID() };
-  for (const r of [{ kind: "start", index: 0 }, { kind: "headers", index: 1, status: 200 }, { kind: "chunk", index: 2, text: JSON.stringify(tree) }, { kind: "end", index: 3, complete: true, finishedAt: 200 }]) await h.api.receiveChatgptCapture({ ...start, ...r }, { tab: { id: 1 } }, "claude");
-  await h.api.serialBackup(async () => {});
+  const saveCache = async (snapshot, updateTime, startedAt) => {
+    const start = { path: `/local/claude-conversation-store/trees/${org}/${h.id}`, method: "CACHE",
+      cache: { conversationUpdatedAt: updateTime, fetchedAt: startedAt }, startedAt, captureId: crypto.randomUUID() };
+    const records = [{ kind: "start", index: 0 }, { kind: "headers", index: 1, status: 200 },
+      { kind: "chunk", index: 2, text: JSON.stringify(snapshot) }, { kind: "end", index: 3, complete: true, finishedAt: startedAt + 1 }];
+    for (const record of records) await h.api.receiveChatgptCapture({ ...start, ...record }, { tab: { id: 1 } }, "claude");
+    await h.api.serialBackup(async () => {});
+  };
+  await saveCache(tree, 10, 100);
   const root = h.root.dirs.get("claude-raw");
-  assert.deepEqual(JSON.parse(root.dirs.get(org).files.get(`${h.id}.json`)), tree);
+  const scope = root.dirs.get(org);
+  assert.deepEqual(JSON.parse(scope.files.get(`${h.id}.json`)), tree);
+  const edited = { ...tree, messages: [{ uuid: "n", content: [{ type: "text", text: "Edited" }] }] };
+  await saveCache(edited, 20, 200);
+  assert.deepEqual(JSON.parse(scope.files.get(`${h.id}.json`)), edited);
+  assert.ok([...scope.dirs.get("versions").dirs.get(h.id).files.values()].includes(JSON.stringify(tree)));
   assert.ok(h.values[`claude-state:${org}:${h.id}`].hash);
   assert.ok(!Object.keys(h.values).some((k) => k.startsWith("chatgpt")));
   const bytes = Buffer.from([0, 255, 128, 9]);
@@ -1060,12 +1066,14 @@ test("Claude backups use organization scope, preserve binary events, and never t
   assert.deepEqual(Buffer.from(raw.text, raw.encoding), bytes);
 });
 
-test("Claude stale cache and disappearing attachment information are held", () => {
+test("Claude accepts newer edits and deletions while holding stale cache and same-time conflicts", () => {
   const { chatgptPromotion } = globalThis.AnandPaletteCore;
   const old = { coverage: "branch", fetchedAt: 20, startedAt: 10, finishedAt: 20, updateTime: 1, messages: { a: { content: [1], files_v2: [{ uuid: "f" }] } } };
   const next = { ...old, fetchedAt: 30, startedAt: 30, finishedAt: 40 };
   assert.equal(chatgptPromotion(old, { ...next, fetchedAt: 10 }), "older-cache-time");
   assert.equal(chatgptPromotion(old, { ...next, messages: { a: { content: [1] } } }), "changed-message-files_v2");
+  assert.equal(chatgptPromotion(old, { ...next, updateTime: 2, messages: {} }), "promote");
+  assert.equal(chatgptPromotion(old, { ...next, updateTime: 2, fetchedAt: 10, messages: {} }), "older-cache-time");
 });
 
 test("Backup activation skips unloaded/restored tabs and isolates a per-tab injection failure", async () => {
@@ -1105,7 +1113,7 @@ test("ChatGPT adopts a finished turn and a filled final image without accepting 
     metadata: { parent_id: "prompt" }, content: { content_type: "thoughts", thoughts: [] } };
   const prior = { coverage: "partial", finishedAt: 20, updateTime: 1, messages: { a: message } };
   const final = { ...message, status: "finished_successfully", content: { content_type: "text", parts: ["done"] } };
-  const next = { coverage: "branch", startedAt: 30, updateTime: 2, messages: { a: final } };
+  const next = { coverage: "branch", startedAt: 30, updateTime: 1, messages: { a: final } };
   assert.equal(chatgptPromotion(prior, next), "promote");
   assert.equal(chatgptPromotion(prior, { ...next, messages: { a: { ...final, metadata: { parent_id: "edit" } } } }), "changed-message-content");
   assert.equal(chatgptPromotion({ ...prior, messages: { a: final } }, { ...next, messages: { a: message } }), "changed-message-content");
